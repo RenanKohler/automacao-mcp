@@ -1,0 +1,5 @@
+.mcp_token
+.env
+.venv/
+__pycache__/
+*.pyc

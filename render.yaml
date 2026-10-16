@@ -1,0 +1,14 @@
+# Blueprint do Render (plano gratuito): New > Blueprint, escolha este repositório e cole o MCP_TOKEN.
+services:
+  - type: web
+    name: automacao-mcp
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /saude
+    envVars:
+      - key: MCP_TOKEN
+        sync: false
+      # 512 MB de RAM: limita processos de renderização e a heap do JavaScript.
+      - key: CHROME_ARGS
+        value: --no-sandbox --disable-dev-shm-usage --disable-gpu --renderer-process-limit=2 --js-flags=--max-old-space-size=192

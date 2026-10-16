@@ -1,0 +1,7 @@
+.venv
+.env
+.mcp_token
+**/__pycache__
+testes
+*.md
+publicar_space.py
