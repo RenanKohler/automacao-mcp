@@ -1,0 +1,41 @@
+plugins {
+    id "com.android.application"
+}
+
+// Número da compilação do GitHub Actions: cada APK novo instala por cima do anterior.
+def build = Integer.parseInt(System.getenv("GITHUB_RUN_NUMBER") ?: "1")
+
+android {
+    namespace "br.automacao.celular"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "br.automacao.celular"
+        minSdk 30          // captura de tela pela acessibilidade (Android 11+)
+        targetSdk 35
+        versionCode build
+        versionName "1.0." + build
+    }
+
+    // Chave fixa no repositório para que as atualizações instalem por cima (app de uso pessoal).
+    signingConfigs {
+        fixa {
+            storeFile file("automacao.keystore")
+            storePassword "automacao"
+            keyAlias "automacao"
+            keyPassword "automacao"
+        }
+    }
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.fixa
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    lint {
+        abortOnError false
+    }
+}

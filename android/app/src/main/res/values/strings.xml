@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_nome">Automação</string>
+    <string name="acessibilidade_descricao">Permite que o Claude opere este celular pelo conector Automação: lê a tela, toca, desliza, digita e abre apps. Só age quando conectado ao seu servidor com o token.</string>
+</resources>

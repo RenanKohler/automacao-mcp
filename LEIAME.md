@@ -38,3 +38,19 @@ acorda na primeira chamada, que pode demorar cerca de um minuto.
 
 Endpoint `/mcp` (token no cabeçalho `Authorization: Bearer` ou no caminho `/mcp/<token>`), saúde em `/saude`.
 Sem estado de sessão: todos os clientes compartilham o mesmo navegador; serve a um único usuário.
+
+## Celular Android sem PC (app Automação)
+
+O servidor também expõe as ferramentas `android_*`, repassadas a um app que roda no próprio celular
+(pasta `android/`, Java sem bibliotecas externas, serviço de acessibilidade). O app abre um WebSocket
+para `wss://<servidor>/celular/<token>` e executa os comandos: árvore da tela, captura (Android 11+),
+toque, toque longo, deslize, escrita com acentos, teclas do sistema, abrir e listar apps.
+
+O GitHub Actions compila o APK a cada push em `android/` e publica em
+https://github.com/RenanKohler/automacao-mcp/releases/download/android/automacao-celular.apk
+
+No celular: instale o APK, abra o app, cole a URL do conector (`https://.../mcp/<token>`), salve e ligue
+o serviço "Automação" em Configurações > Acessibilidade. Se o Android bloquear como configuração restrita,
+abra Informações do app > ⋮ > Permitir configurações restritas. Permita também rodar em segundo plano.
+
+Teste da ponte no servidor, sem celular: `python -m testes.teste_celular`.

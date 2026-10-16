@@ -189,7 +189,7 @@ def main() -> int:
         replies = json.loads(body)
         check("lote: só respostas de pedidos", status == 200 and [r["id"] for r in replies] == [2, 3], status)
         tools = {t["name"] for t in replies[1]["result"]["tools"]}
-        check("só ferramentas de navegador", tools and all(n.startswith("browser_") for n in tools), len(tools))
+        check("navegador e celular, sem PC", tools and all(n.startswith(("browser_", "android_")) for n in tools), len(tools))
 
         def call(name: str, **arguments) -> dict:
             msg = {"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": name, "arguments": arguments}}
