@@ -167,6 +167,16 @@ def main() -> int:
                 raw += chunk
         check("corpo chunked", raw.startswith(b"HTTP/1.1 200") and b'"result"' in raw, raw[:40])
         check("HEAD /saude", http("HEAD", base + "/saude")[0] == 200)
+        with socket.create_connection(("127.0.0.1", port), timeout=30) as sock:
+            payload = json.dumps(init).encode()
+            head = b"POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: "
+            sock.sendall(head + str(len(payload)).encode() + b"\r\n\r\n" + payload)  # sem token: 401
+            sock.sendall(b"GET /saude HTTP/1.1\r\nHost: x\r\n\r\n")
+            raw = b""
+            while chunk := sock.recv(65536):
+                raw += chunk
+        check("erro fecha a conexão (sem 501 no pedido seguinte)",
+              raw.startswith(b"HTTP/1.1 401") and raw.count(b"HTTP/1.1 ") == 1, raw[:60])
         check("Origin não permitida: 403",
               http("POST", base + "/mcp", init, {**auth, "Origin": "https://evil.example"})[0] == 403)
         check("Origin permitida", http("POST", base + "/mcp", init, {**auth, "Origin": "https://claude.ai"})[0] == 200)

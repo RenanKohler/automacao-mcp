@@ -85,6 +85,11 @@ class Handler(BaseHTTPRequestHandler):
     def _send(self, status: int, body: bytes = b"", content_type: str = "application/json",
               headers: dict[str, str] | None = None) -> None:
         self.send_response(status)
+        if status >= 400:
+            # Em erro o corpo do pedido pode não ter sido lido: fechar a conexão evita que ele vire o
+            # início do próximo pedido numa conexão reaproveitada (keep-alive do proxy do host).
+            self.close_connection = True
+            self.send_header("Connection", "close")
         if body:
             self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
