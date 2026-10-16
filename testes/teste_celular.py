@@ -41,6 +41,8 @@ class CelularFalso:
                 acao, args = msg["acao"], msg["args"]
                 if acao == "screenshot":
                     reply = {"ok": True, "imagem": {"data": PNG_1X1, "mimeType": "image/png"}, "texto": "Captura 1x1." + "." * 300_000}
+                elif acao == "tap" and "texto" in args:
+                    reply = {"ok": True, "texto": f"Tocou em \"{args['texto']}\"."}
                 elif acao == "tap":
                     reply = {"ok": True, "texto": f"Tocou em ({args['x']}, {args['y']})."}
                 elif acao == "type":
@@ -91,6 +93,11 @@ def main() -> int:
         tools = {t["name"] for t in rpc("tools/list")["tools"]}
         check("ferramentas android_* listadas", {"android_tap", "android_ui", "android_screenshot"} <= tools, len(tools))
         check("navegador continua", "browser_navigate" in tools)
+        schemas = {t["name"]: t["inputSchema"] for t in rpc("tools/list")["tools"]}
+        check("tap aceita texto, id e app sem x/y obrigatórios",
+              {"texto", "id", "app", "x", "y"} <= set(schemas["android_tap"]["properties"])
+              and not schemas["android_tap"].get("required"), schemas["android_tap"])
+        check("type aceita app e ponto do campo", {"app", "x", "y", "id"} <= set(schemas["android_type"]["properties"]))
 
         r = call("android_tap", x=1, y=2)
         check("sem celular: erro claro", r["isError"] and "não está conectado" in text_of(r), text_of(r))
@@ -115,6 +122,10 @@ def main() -> int:
         check("tap repassado", not r["isError"] and "(10, 20)" in text_of(r), text_of(r))
         check("argumentos chegam ao celular", celular.recebidos[-1] == {"id": celular.recebidos[-1]["id"],
                                                                          "acao": "tap", "args": {"x": 10, "y": 20}})
+        r = call("android_tap", texto="Enviar", app="com.whatsapp")
+        check("tap por texto", not r["isError"] and '"Enviar"' in text_of(r), text_of(r))
+        check("texto e app chegam ao celular", celular.recebidos[-1]["args"] == {"texto": "Enviar", "app": "com.whatsapp"},
+              celular.recebidos[-1])
         r = call("android_type", text="ação ç ✓")
         check("texto com acento", not r["isError"] and "8 caracteres" in text_of(r), text_of(r))
         r = call("android_screenshot")

@@ -35,44 +35,62 @@ CALL_TIMEOUT = 45.0
 NAO_CONECTADO = ("O celular não está conectado. Abra o app Automação no celular, confira se o serviço de "
                  "acessibilidade está ligado e se o endereço do servidor está correto.")
 
-_XY = {"type": "integer", "description": "Pixels da última android_screenshot."}
+_XY = {"type": "integer", "description": "Pixels da última android_screenshot ou android_ui."}
+_APP = {"type": "string", "description":
+        "Pacote do app que deve estar na frente (ex.: com.whatsapp). Se outro app, como o Claude, tiver tomado "
+        "a frente, este é trazido de volta antes da ação. Depois de android_open_app não precisa repetir."}
 
 TOOLS: list[dict[str, Any]] = [
     {"name": "android_status", "read_only": True, "schema": {"type": "object", "properties": {}},
      "description": "Mostra se o celular Android está conectado ao servidor, com modelo, versão e tamanho das capturas."},
-    {"name": "android_screenshot", "read_only": True, "schema": {"type": "object", "properties": {}},
+    {"name": "android_screenshot", "read_only": True, "schema": {"type": "object", "properties": {"app": _APP}},
      "description": "Captura a tela do celular. As coordenadas das outras ferramentas android_* são pixels desta captura."},
-    {"name": "android_ui", "read_only": True, "schema": {"type": "object", "properties": {}},
-     "description": "Lê os elementos da tela atual do celular (textos, botões, campos) com o centro de cada um em "
-                    "pixels da captura. Prefira esta ferramenta a capturas para achar onde tocar."},
+    {"name": "android_ui", "read_only": True, "schema": {"type": "object", "properties": {"app": _APP}},
+     "description": "Lê os elementos da tela atual do celular (textos, botões, campos, ids) com o centro de cada um em "
+                    "pixels da captura. Prefira esta ferramenta a capturas."},
     {"name": "android_tap", "read_only": False,
-     "schema": {"type": "object", "properties": {"x": _XY, "y": _XY}, "required": ["x", "y"]},
-     "description": "Toca na tela do celular no ponto (x, y)."},
+     "schema": {"type": "object", "properties": {
+         "texto": {"type": "string", "description": "Texto ou descrição do elemento (ex.: \"Enviar\", \"Maria\"). "
+                                                    "Igual vence parcial; se houver mais de um, nada é tocado."},
+         "id": {"type": "string", "description": "id do elemento, como aparece em android_ui."},
+         "x": _XY, "y": _XY, "app": _APP}},
+     "description": "Toca num elemento do celular pelo texto ou id (preferível: funciona mesmo se a tela se mexer) "
+                    "ou no ponto (x, y)."},
     {"name": "android_long_press", "read_only": False,
-     "schema": {"type": "object", "properties": {"x": _XY, "y": _XY,
+     "schema": {"type": "object", "properties": {"x": _XY, "y": _XY, "app": _APP,
                                                  "duration_ms": {"type": "integer", "description": "Duração em ms (padrão 800)."}},
                 "required": ["x", "y"]},
      "description": "Toque longo no ponto (x, y) da tela do celular."},
     {"name": "android_swipe", "read_only": False,
      "schema": {"type": "object", "properties": {
          "x1": {"type": "integer"}, "y1": {"type": "integer"}, "x2": {"type": "integer"}, "y2": {"type": "integer"},
-         "duration_ms": {"type": "integer", "description": "Duração em ms (padrão 300). Maior = rolagem mais lenta."}},
+         "duration_ms": {"type": "integer", "description": "Duração em ms (padrão 300). Maior = rolagem mais lenta."},
+         "app": _APP},
          "required": ["x1", "y1", "x2", "y2"]},
      "description": "Desliza o dedo de (x1, y1) até (x2, y2), em pixels da captura. Para rolar a lista para baixo, "
                     "deslize de baixo para cima."},
     {"name": "android_type", "read_only": False,
-     "schema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
-     "description": "Escreve texto no campo em foco do celular (toque no campo antes). Aceita acentos e emojis; "
-                    "um \\n no fim envia (Enter do teclado)."},
+     "schema": {"type": "object", "properties": {
+         "text": {"type": "string"},
+         "x": {"type": "integer", "description": "Opcional: ponto do campo, quando a tela tem mais de um."},
+         "y": {"type": "integer", "description": "Opcional: ponto do campo, quando a tela tem mais de um."},
+         "id": {"type": "string", "description": "Opcional: id do campo, como aparece em android_ui."},
+         "app": _APP},
+         "required": ["text"]},
+     "description": "Escreve texto num campo do celular, sem usar o teclado: o campo em foco ou, se nenhum, o único "
+                    "campo de texto da tela (ex.: \"Mensagem\" no WhatsApp). Não precisa tocar no campo antes. "
+                    "Acrescenta ao que já estiver escrito. Aceita acentos e emojis. Não envia: em apps de mensagem, "
+                    "toque depois no botão de enviar (android_tap com texto \"Enviar\")."},
     {"name": "android_key", "read_only": False,
      "schema": {"type": "object", "properties": {"key": {"type": "string", "description":
-         "back, home, recents, notifications, quick_settings, enter, power_dialog ou lock_screen."}},
+         "back, home, recents, notifications, quick_settings, enter, power_dialog ou lock_screen."}, "app": _APP},
          "required": ["key"]},
      "description": "Aciona um botão do sistema do celular (voltar, início, recentes, notificações...)."},
     {"name": "android_open_app", "read_only": False,
      "schema": {"type": "object", "properties": {"package": {"type": "string", "description": "Ex.: com.android.chrome"}},
                 "required": ["package"]},
-     "description": "Abre um app do celular pelo nome do pacote (veja android_list_apps)."},
+     "description": "Abre um app do celular pelo nome do pacote (veja android_list_apps). Ele passa a ser o app operado: "
+                    "as ações seguintes o trazem de volta se outro app tomar a frente."},
     {"name": "android_list_apps", "read_only": True,
      "schema": {"type": "object", "properties": {"filter": {"type": "string", "description": "Trecho do nome ou do pacote."}}},
      "description": "Lista os apps do celular que podem ser abertos, com nome e pacote."},

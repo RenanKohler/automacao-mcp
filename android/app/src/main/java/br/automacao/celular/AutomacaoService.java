@@ -51,9 +51,16 @@ public class AutomacaoService extends AccessibilityService implements Conexao.Tr
     private static final int MAX_LONGO = 1280, MAX_CURTO = 720;
     private static final int MAX_ELEMENTOS = 300;
     private static final long ASSENTAR_MS = 400;
+    private static final long TRAZER_MS = 4000;
+    /** Apps que não são alvo da automação: se um deles vier para a frente, o app alvo é trazido de volta. */
+    private static final String PACOTE_CLAUDE = "com.anthropic.claude";
 
     private Conexao conexao;
     private Thread threadConexao;
+    /** App que a automação está operando (android_open_app ou o parâmetro app). */
+    private volatile String appAlvo;
+    /** Pacote e teclado na última leitura da tela, para saber se coordenadas antigas ainda valem. */
+    private volatile String estadoVisto;
 
     // ------------------------------------------------------------------ ciclo de vida
 
@@ -186,21 +193,33 @@ public class AutomacaoService extends AccessibilityService implements Conexao.Tr
     @Override
     public JSONObject executar(String acao, JSONObject a) throws Exception {
         switch (acao) {
-            case "screenshot":
-                return captura();
-            case "ui":
-                return texto(arvore());
+            case "screenshot": {
+                String nota = garantirApp(a, false);
+                estadoVisto = estadoTela();
+                JSONObject o = captura();
+                o.put("texto", nota + o.getString("texto"));
+                return o;
+            }
+            case "ui": {
+                String nota = garantirApp(a, false);
+                estadoVisto = estadoTela();
+                return texto(nota + arvore());
+            }
             case "tap":
-                return texto(toque(a.getInt("x"), a.getInt("y"), 60));
-            case "long_press":
-                return texto(toque(a.getInt("x"), a.getInt("y"), a.optInt("duration_ms", 800)));
-            case "swipe":
-                return texto(deslizar(a.getInt("x1"), a.getInt("y1"), a.getInt("x2"), a.getInt("y2"),
+                return texto(tocar(a));
+            case "long_press": {
+                String nota = garantirApp(a, true);
+                return texto(nota + toque(a.getInt("x"), a.getInt("y"), a.optInt("duration_ms", 800)));
+            }
+            case "swipe": {
+                String nota = garantirApp(a, true);
+                return texto(nota + deslizar(a.getInt("x1"), a.getInt("y1"), a.getInt("x2"), a.getInt("y2"),
                         a.optInt("duration_ms", 300)));
+            }
             case "type":
-                return texto(escrever(a.getString("text")));
+                return texto(escrever(a));
             case "key":
-                return texto(tecla(a.getString("key")));
+                return texto(tecla(a.getString("key"), a));
             case "open_app":
                 return texto(abrirApp(a.getString("package")));
             case "list_apps":
@@ -223,6 +242,139 @@ public class AutomacaoService extends AccessibilityService implements Conexao.Tr
         } catch (InterruptedException ignored) {
             Thread.currentThread().interrupt();
         }
+    }
+
+    private static void pausa(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    // ---- app em primeiro plano
+
+    /** Janelas de app (não teclado nem sistema), a ativa primeiro, depois de cima para baixo. */
+    private List<AccessibilityWindowInfo> janelasDeApp() {
+        List<AccessibilityWindowInfo> todas = getWindows();
+        List<AccessibilityWindowInfo> apps = new ArrayList<>();
+        if (todas == null) {
+            return apps;
+        }
+        for (AccessibilityWindowInfo j : todas) {
+            if (j.getType() == AccessibilityWindowInfo.TYPE_APPLICATION) {
+                if (j.isActive() || j.isFocused()) {
+                    apps.add(0, j);
+                } else {
+                    apps.add(j);
+                }
+            }
+        }
+        return apps;
+    }
+
+    private List<AccessibilityNodeInfo> raizesDeApp() {
+        List<AccessibilityNodeInfo> raizes = new ArrayList<>();
+        for (AccessibilityWindowInfo j : janelasDeApp()) {
+            AccessibilityNodeInfo r = j.getRoot();
+            if (r != null) {
+                raizes.add(r);
+            }
+        }
+        if (raizes.isEmpty()) {
+            AccessibilityNodeInfo r = getRootInActiveWindow();
+            if (r != null) {
+                raizes.add(r);
+            }
+        }
+        return raizes;
+    }
+
+    private String pacoteAtivo() {
+        List<AccessibilityNodeInfo> raizes = raizesDeApp();
+        return raizes.isEmpty() || raizes.get(0).getPackageName() == null ? ""
+                : raizes.get(0).getPackageName().toString();
+    }
+
+    private boolean tecladoAberto() {
+        List<AccessibilityWindowInfo> todas = getWindows();
+        if (todas != null) {
+            for (AccessibilityWindowInfo j : todas) {
+                if (j.getType() == AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private String estadoTela() {
+        return pacoteAtivo() + (tecladoAberto() ? " com teclado" : " sem teclado");
+    }
+
+    private boolean naoEhAlvo(String pacote) {
+        return pacote.isEmpty() || PACOTE_CLAUDE.equals(pacote) || getPackageName().equals(pacote);
+    }
+
+    /**
+     * Confere, antes de agir, se o app operado está na frente. Se o Claude (ou este app) tomou a frente,
+     * traz o app alvo de volta. Ações por coordenada só seguem se a tela voltou como estava na última
+     * leitura (mesmo app, teclado no mesmo estado); senão nada é tocado e a ação devolve um erro.
+     * Devolve um aviso para o início da resposta, ou "".
+     */
+    private String garantirApp(JSONObject a, boolean porCoordenada) {
+        String pedido = a.optString("app", "").trim();
+        if (!pedido.isEmpty()) {
+            appAlvo = pedido;
+        }
+        String alvo = appAlvo;
+        String atual = pacoteAtivo();
+        if (alvo == null || alvo.isEmpty()) {
+            if (naoEhAlvo(atual)) {
+                throw new IllegalStateException("O app " + (atual.isEmpty() ? "desconhecido" : atual)
+                        + " está em primeiro plano e não é o app a operar; nada foi feito. Abra o app com "
+                        + "android_open_app ou passe o parâmetro app (ex.: com.whatsapp).");
+            }
+            return "";
+        }
+        if (alvo.equals(atual)) {
+            return "";
+        }
+        if (pedido.isEmpty() && !naoEhAlvo(atual)) {
+            // A própria automação levou a outro app (um link, um seletor): passa a operar esse.
+            appAlvo = atual;
+            return "";
+        }
+        trazerParaFrente(alvo);
+        String aviso = "O app " + atual + " estava na frente; " + alvo + " foi trazido de volta.";
+        if (porCoordenada) {
+            String agora = estadoTela();
+            if (estadoVisto == null || !estadoVisto.equals(agora)) {
+                throw new IllegalStateException(aviso + " A tela mudou desde a última leitura (" + agora
+                        + "), então nada foi tocado. Leia a tela com android_ui e repita a ação, "
+                        + "de preferência por texto ou id.");
+            }
+        }
+        return aviso + "\n";
+    }
+
+    private void trazerParaFrente(String pacote) {
+        Intent i = getPackageManager().getLaunchIntentForPackage(pacote);
+        if (i == null) {
+            throw new IllegalArgumentException("App não encontrado ou sem tela inicial: " + pacote + ". Veja android_list_apps.");
+        }
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+        startActivity(i);
+        long fim = System.currentTimeMillis() + TRAZER_MS;
+        while (System.currentTimeMillis() < fim) {
+            pausa(150);
+            if (pacote.equals(pacoteAtivo())) {
+                assentar();
+                return;
+            }
+        }
+        throw new IllegalStateException("Não foi possível trazer " + pacote + " para a frente; está "
+                + pacoteAtivo() + ". Nada foi feito.");
     }
 
     // ---- captura
@@ -457,48 +609,261 @@ public class AutomacaoService extends AccessibilityService implements Conexao.Tr
         return "Deslizou de (" + x1 + ", " + y1 + ") até (" + x2 + ", " + y2 + ").";
     }
 
-    // ---- texto e teclas
+    // ---- toque por elemento
 
-    private AccessibilityNodeInfo campoEmFoco() {
-        AccessibilityNodeInfo n = findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
-        if (n == null || !n.isEditable()) {
-            throw new IllegalStateException("Nenhum campo de texto em foco. Toque no campo antes de escrever.");
+    private String tocar(JSONObject a) throws Exception {
+        String procurado = a.optString("texto", a.optString("text", "")).trim();
+        String id = a.optString("id", "").trim();
+        if (!procurado.isEmpty() || !id.isEmpty()) {
+            String nota = garantirApp(a, false);
+            return nota + clicar(acharElemento(procurado, id));
         }
-        return n;
+        if (!a.has("x") || !a.has("y")) {
+            throw new IllegalArgumentException("Informe texto, id, ou x e y.");
+        }
+        String nota = garantirApp(a, true);
+        return nota + toque(a.getInt("x"), a.getInt("y"), 60);
     }
 
-    private String escrever(String texto) {
+    private static String textoDe(AccessibilityNodeInfo n) {
+        return n.getText() != null ? n.getText().toString().trim() : "";
+    }
+
+    private static String descDe(AccessibilityNodeInfo n) {
+        return n.getContentDescription() != null ? n.getContentDescription().toString().trim() : "";
+    }
+
+    private static boolean idConfere(AccessibilityNodeInfo n, String id) {
+        String v = n.getViewIdResourceName();
+        return v != null && (v.equals(id) || v.endsWith("/" + id));
+    }
+
+    private void coletar(AccessibilityNodeInfo n, List<AccessibilityNodeInfo> saida) {
+        if (n == null) {
+            return;
+        }
+        if (n.isVisibleToUser()) {
+            saida.add(n);
+        }
+        for (int i = 0; i < n.getChildCount(); i++) {
+            coletar(n.getChild(i), saida);
+        }
+    }
+
+    /** Nós visíveis das janelas de app e de sistema (diálogos), sem o teclado. */
+    private List<AccessibilityNodeInfo> nosVisiveis(boolean soApp) {
+        List<AccessibilityNodeInfo> nos = new ArrayList<>();
+        if (soApp) {
+            for (AccessibilityNodeInfo r : raizesDeApp()) {
+                coletar(r, nos);
+            }
+            return nos;
+        }
+        List<AccessibilityWindowInfo> todas = getWindows();
+        List<AccessibilityNodeInfo> raizes = raizesDeApp();
+        if (todas != null) {
+            for (AccessibilityWindowInfo j : todas) {
+                if (j.getType() == AccessibilityWindowInfo.TYPE_SYSTEM && j.getRoot() != null) {
+                    raizes.add(j.getRoot());
+                }
+            }
+        }
+        for (AccessibilityNodeInfo r : raizes) {
+            coletar(r, nos);
+        }
+        return nos;
+    }
+
+    private AccessibilityNodeInfo acharElemento(String procurado, String id) {
+        String p = procurado.toLowerCase(Locale.ROOT);
+        List<AccessibilityNodeInfo> exatos = new ArrayList<>(), parciais = new ArrayList<>();
+        for (AccessibilityNodeInfo n : nosVisiveis(false)) {
+            if (!id.isEmpty() && !idConfere(n, id)) {
+                continue;
+            }
+            if (p.isEmpty()) {
+                exatos.add(n);
+                continue;
+            }
+            String t = textoDe(n).toLowerCase(Locale.ROOT), d = descDe(n).toLowerCase(Locale.ROOT);
+            if (t.equals(p) || d.equals(p)) {
+                exatos.add(n);
+            } else if (t.contains(p) || d.contains(p)) {
+                parciais.add(n);
+            }
+        }
+        List<AccessibilityNodeInfo> achados = exatos.isEmpty() ? parciais : exatos;
+        String alvo = (procurado.isEmpty() ? "" : "\"" + procurado + "\"") + (id.isEmpty() ? "" : " id=" + id);
+        if (achados.isEmpty()) {
+            throw new IllegalArgumentException("Nenhum elemento visível com " + alvo.trim()
+                    + ". Veja os textos e ids em android_ui.");
+        }
+        if (achados.size() > 1) {
+            List<String> linhas = new ArrayList<>();
+            for (int i = 0; i < Math.min(achados.size(), 8); i++) {
+                String linha = descrever(achados.get(i));
+                if (linha != null) {
+                    linhas.add(linha);
+                }
+            }
+            throw new IllegalArgumentException(achados.size() + " elementos com " + alvo.trim()
+                    + "; nada foi tocado. Use um texto mais específico, o id, ou x e y:\n" + String.join("\n", linhas));
+        }
+        return achados.get(0);
+    }
+
+    private String clicar(AccessibilityNodeInfo n) throws Exception {
+        String nome = !textoDe(n).isEmpty() ? textoDe(n) : descDe(n);
+        Rect r = new Rect();
+        n.getBoundsInScreen(r);
+        String onde = " em (" + paraCaptura(r.centerX()) + ", " + paraCaptura(r.centerY()) + ").";
+        AccessibilityNodeInfo c = n;
+        for (int i = 0; c != null && i < 8 && !c.isClickable(); i++) {
+            c = c.getParent();
+        }
+        if (c != null && c.isClickable() && c.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+            assentar();
+            return "Tocou em \"" + corta(nome) + "\"" + onde;
+        }
+        Path p = new Path();
+        p.moveTo(r.centerX(), r.centerY());
+        gesto(p, 60);
+        return "Tocou (gesto) em \"" + corta(nome) + "\"" + onde;
+    }
+
+    // ---- texto e teclas
+
+    /**
+     * Acha o campo onde escrever: pelo ponto (x, y) ou id, se dados; senão o campo com foco de entrada
+     * nas janelas de app; senão o único campo de texto visível no app (ex.: "Mensagem" do WhatsApp).
+     */
+    private AccessibilityNodeInfo acharCampo(JSONObject a) throws Exception {
+        List<AccessibilityNodeInfo> editaveis = new ArrayList<>();
+        for (AccessibilityNodeInfo n : nosVisiveis(true)) {
+            if (n.isEditable() && n.isEnabled()) {
+                editaveis.add(n);
+            }
+        }
+        if (a.has("x") && a.has("y")) {
+            int x = a.getInt("x"), y = a.getInt("y");
+            conferirPonto(x, y);
+            int px = Math.round(paraTela(x)), py = Math.round(paraTela(y));
+            AccessibilityNodeInfo melhor = null;
+            long menor = Long.MAX_VALUE;
+            for (AccessibilityNodeInfo n : editaveis) {
+                Rect r = new Rect();
+                n.getBoundsInScreen(r);
+                long area = (long) r.width() * r.height();
+                if (r.contains(px, py) && area < menor) {
+                    melhor = n;
+                    menor = area;
+                }
+            }
+            if (melhor == null) {
+                throw new IllegalArgumentException("Não há campo de texto em (" + x + ", " + y
+                        + "). Os campos aparecem como \"campo de texto\" em android_ui.");
+            }
+            return melhor;
+        }
+        String id = a.optString("id", "").trim();
+        if (!id.isEmpty()) {
+            for (AccessibilityNodeInfo n : editaveis) {
+                if (idConfere(n, id)) {
+                    return n;
+                }
+            }
+            throw new IllegalArgumentException("Nenhum campo de texto visível com id=" + id + ".");
+        }
+        for (AccessibilityNodeInfo r : raizesDeApp()) {
+            AccessibilityNodeInfo f = r.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+            if (f != null && f.isEditable()) {
+                return f;
+            }
+        }
+        AccessibilityNodeInfo f = findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+        if (f != null && f.isEditable() && !naoEhAlvo(String.valueOf(f.getPackageName()))) {
+            return f;
+        }
+        for (AccessibilityNodeInfo n : editaveis) {
+            if (n.isFocused()) {
+                return n;
+            }
+        }
+        if (editaveis.size() == 1) {
+            return editaveis.get(0);
+        }
+        if (editaveis.isEmpty()) {
+            throw new IllegalStateException("Não há campo de texto visível em " + pacoteAtivo()
+                    + ". Abra a tela com o campo e tente de novo.");
+        }
+        List<String> linhas = new ArrayList<>();
+        for (AccessibilityNodeInfo n : editaveis) {
+            String linha = descrever(n);
+            if (linha != null) {
+                linhas.add(linha);
+            }
+        }
+        throw new IllegalStateException("Há " + editaveis.size() + " campos de texto e nenhum em foco; "
+                + "passe x e y (ou id) do campo:\n" + String.join("\n", linhas));
+    }
+
+    private static String textoAtual(AccessibilityNodeInfo campo) {
+        if (campo.getText() == null || campo.isShowingHintText()) {
+            return "";
+        }
+        String t = campo.getText().toString();
+        CharSequence dica = campo.getHintText();
+        return dica != null && t.contentEquals(dica) ? "" : t;
+    }
+
+    private String escrever(JSONObject a) throws Exception {
+        String nota = garantirApp(a, false);
+        String texto = a.getString("text");
         boolean enviar = texto.endsWith("\n");
         String novo = enviar ? texto.substring(0, texto.length() - 1) : texto;
-        AccessibilityNodeInfo campo = campoEmFoco();
-        String atual = campo.getText() != null && !campo.isShowingHintText() ? campo.getText().toString() : "";
+        AccessibilityNodeInfo campo = acharCampo(a);
+        if (!campo.isFocused()) {
+            campo.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
+            campo.refresh();
+        }
+        String atual = textoAtual(campo);
         String completo = atual + novo;
         Bundle args = new Bundle();
         args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, completo);
         if (!campo.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
-            throw new IllegalStateException("O campo em foco não aceitou o texto.");
+            throw new IllegalStateException("O campo de texto não aceitou o texto.");
         }
         Bundle sel = new Bundle();
         sel.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, completo.length());
         sel.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, completo.length());
         campo.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, sel);
-        if (enviar) {
-            campo.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.getId());
-        }
+        boolean enviou = enviar && campo.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.getId());
         assentar();
-        return "Escreveu " + novo.codePointCount(0, novo.length()) + " caracteres" + (enviar ? " e enviou." : ".");
+        campo.refresh();
+        String depois = textoAtual(campo);
+        Rect r = new Rect();
+        campo.getBoundsInScreen(r);
+        String onde = " no campo em (" + paraCaptura(r.centerX()) + ", " + paraCaptura(r.centerY()) + ")";
+        String fim = !enviar ? "." : enviou ? " e acionou Enter." : ", mas o campo não aceitou Enter; toque no botão de enviar.";
+        if (!enviou && !depois.contains(novo)) {
+            fim += " Atenção: o campo não mostra o texto escrito; confira com android_ui.";
+        }
+        return nota + "Escreveu " + novo.codePointCount(0, novo.length()) + " caracteres" + onde + fim;
     }
 
-    private String tecla(String nome) {
+    private String tecla(String nome, JSONObject a) throws Exception {
         String k = nome.trim().toLowerCase(Locale.ROOT);
         int acao;
+        String nota = "";
         switch (k) {
             case "back":
             case "voltar":
+                nota = garantirApp(a, false);
                 acao = GLOBAL_ACTION_BACK;
                 break;
             case "home":
             case "inicio":
+                appAlvo = null;
                 acao = GLOBAL_ACTION_HOME;
                 break;
             case "recents":
@@ -519,11 +884,13 @@ public class AutomacaoService extends AccessibilityService implements Conexao.Tr
                 acao = GLOBAL_ACTION_LOCK_SCREEN;
                 break;
             case "enter":
-                if (!campoEmFoco().performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.getId())) {
-                    throw new IllegalStateException("O campo em foco não aceitou o Enter.");
+                nota = garantirApp(a, false);
+                if (!acharCampo(a).performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.getId())) {
+                    throw new IllegalStateException("O campo de texto não aceitou o Enter. Em apps de mensagem, "
+                            + "toque no botão de enviar (ex.: android_tap com texto \"Enviar\").");
                 }
                 assentar();
-                return "Enter enviado.";
+                return nota + "Enter enviado.";
             default:
                 throw new IllegalArgumentException("Tecla não suportada: " + nome
                         + ". Use back, home, recents, notifications, quick_settings, enter, power_dialog ou lock_screen.");
@@ -532,24 +899,20 @@ public class AutomacaoService extends AccessibilityService implements Conexao.Tr
             throw new IllegalStateException("O sistema recusou a ação " + k + ".");
         }
         assentar();
-        return "Acionou " + k + ".";
+        return nota + "Acionou " + k + ".";
     }
 
     // ---- apps
 
     private String abrirApp(String pacote) {
-        Intent i = getPackageManager().getLaunchIntentForPackage(pacote);
-        if (i == null) {
-            throw new IllegalArgumentException("App não encontrado ou sem tela inicial: " + pacote + ". Veja android_list_apps.");
+        appAlvo = pacote;
+        if (pacote.equals(pacoteAtivo())) {
+            return "O app " + pacote + " já está na frente.";
         }
-        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
-        startActivity(i);
-        try {
-            Thread.sleep(1200);
-        } catch (InterruptedException ignored) {
-            Thread.currentThread().interrupt();
-        }
-        return "Abriu " + pacote + ".";
+        trazerParaFrente(pacote);
+        pausa(600);
+        return "Abriu " + pacote + ". As próximas ações conferem se ele continua na frente e o trazem de volta se outro app "
+                + "(como o Claude) tomar a frente.";
     }
 
     private String listarApps(String filtro) {
