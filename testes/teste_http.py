@@ -151,8 +151,22 @@ def main() -> int:
         check("GET /mcp: 405", status == 405 and headers.get("Allow") == "POST", status)
         check("Content-Type errado: 415", http("POST", base + "/mcp", b"{}", auth, "text/plain")[0] == 415)
         check("JSON inválido: 400", http("POST", base + "/mcp", b"{", auth)[0] == 400)
-        check("versão do protocolo errada: 400",
-              http("POST", base + "/mcp", init, {**auth, "MCP-Protocol-Version": "1999-01-01"})[0] == 400)
+        check("versão desconhecida no cabeçalho aceita",
+              http("POST", base + "/mcp", init, {**auth, "MCP-Protocol-Version": "2099-01-01"})[0] == 200)
+        init_new = {**init, "params": {**init["params"], "protocolVersion": "2025-11-25"}}
+        result = json.loads(http("POST", base + "/mcp", init_new, auth)[2])["result"]
+        check("negocia 2025-11-25", result["protocolVersion"] == "2025-11-25", result["protocolVersion"])
+        with socket.create_connection(("127.0.0.1", port), timeout=30) as sock:
+            payload = json.dumps(init).encode()
+            sock.sendall(b"POST /mcp/" + token.encode() + b" HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                         b"Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                         + f"{len(payload) - 5:x}\r\n".encode() + payload[:-5] + b"\r\n"
+                         + b"5\r\n" + payload[-5:] + b"\r\n0\r\n\r\n")
+            raw = b""
+            while chunk := sock.recv(65536):
+                raw += chunk
+        check("corpo chunked", raw.startswith(b"HTTP/1.1 200") and b'"result"' in raw, raw[:40])
+        check("HEAD /saude", http("HEAD", base + "/saude")[0] == 200)
         check("Origin não permitida: 403",
               http("POST", base + "/mcp", init, {**auth, "Origin": "https://evil.example"})[0] == 403)
         check("Origin permitida", http("POST", base + "/mcp", init, {**auth, "Origin": "https://claude.ai"})[0] == 200)

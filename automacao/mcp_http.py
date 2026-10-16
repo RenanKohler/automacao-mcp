@@ -37,6 +37,8 @@ from .mcp_servidor import PROTOCOL_VERSIONS, Ferramentas, ServidorMCP, build_par
 log = logging.getLogger("automacao.mcp_http")
 
 MAX_BODY = 4 * 1024 * 1024
+# Versões aceitas no initialize; o despacho é o mesmo em todas (só ferramentas, sem recursos opcionais).
+HTTP_PROTOCOL_VERSIONS = ("2025-11-25",) + tuple(PROTOCOL_VERSIONS)
 MIN_TOKEN_LEN = 32
 
 INSTRUCTIONS_BROWSER = """\
@@ -58,6 +60,8 @@ class ServidorHTTP(ServidorMCP):
 
     def _initialize(self, params: dict) -> dict:
         result = super()._initialize(params)
+        requested = params.get("protocolVersion")
+        result["protocolVersion"] = requested if requested in HTTP_PROTOCOL_VERSIONS else HTTP_PROTOCOL_VERSIONS[0]
         if self.modo == "browser":
             result["instructions"] = INSTRUCTIONS_BROWSER
         return result
@@ -124,7 +128,47 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return "mcp"
 
+    def _read_body(self) -> bytes | None:
+        """Corpo do POST, com Content-Length ou Transfer-Encoding: chunked; None quando já respondeu."""
+        if "chunked" in self.headers.get("Transfer-Encoding", "").lower():
+            parts, total = [], 0
+            while True:
+                try:
+                    size = int(self.rfile.readline(1024).split(b";", 1)[0].strip(), 16)
+                except ValueError:
+                    self._error(HTTPStatus.BAD_REQUEST, "Corpo chunked inválido.")
+                    return None
+                if size == 0:
+                    while self.rfile.readline(1024) not in (b"\r\n", b"\n", b""):
+                        pass
+                    return b"".join(parts)
+                total += size
+                if total > MAX_BODY:
+                    self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Mensagem grande demais.")
+                    return None
+                parts.append(self.rfile.read(size))
+                self.rfile.readline(1024)
+        try:
+            length = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            self._error(HTTPStatus.LENGTH_REQUIRED, "Content-Length ausente ou inválido.")
+            return None
+        if length < 0 or length > MAX_BODY:
+            self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Mensagem grande demais.")
+            return None
+        return self.rfile.read(length)
+
     # ------------------------------------------------------------------ métodos
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        route = self._route()
+        if route == "saude":
+            self._send(HTTPStatus.OK)
+        elif route == "mcp":
+            self._send(HTTPStatus.METHOD_NOT_ALLOWED, headers={"Allow": "POST"})
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        self._send(HTTPStatus.NO_CONTENT, headers={"Allow": "GET, POST, HEAD, OPTIONS"})
 
     def do_GET(self) -> None:  # noqa: N802
         route = self._route()
@@ -142,24 +186,19 @@ class Handler(BaseHTTPRequestHandler):
             if self.path.split("?", 1)[0].rstrip("/") == "/saude":
                 self._send(HTTPStatus.METHOD_NOT_ALLOWED, headers={"Allow": "GET"})
             return
+        # Versão desconhecida no cabeçalho não é recusada: clientes mais novos ainda falam o mesmo despacho.
         version = self.headers.get("MCP-Protocol-Version")
-        if version and version not in PROTOCOL_VERSIONS:
-            self._error(HTTPStatus.BAD_REQUEST, f"Versão do protocolo não suportada: {version}")
-            return
+        if version and version not in HTTP_PROTOCOL_VERSIONS:
+            log.info("cliente com MCP-Protocol-Version %s", version)
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
-        if content_type != "application/json":
+        if content_type and content_type != "application/json":
             self._error(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "Envie Content-Type: application/json.")
             return
-        try:
-            length = int(self.headers.get("Content-Length", ""))
-        except ValueError:
-            self._error(HTTPStatus.LENGTH_REQUIRED, "Content-Length ausente ou inválido.")
-            return
-        if length < 0 or length > MAX_BODY:
-            self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Mensagem grande demais.")
+        body = self._read_body()
+        if body is None:
             return
         try:
-            message = json.loads(self.rfile.read(length).decode("utf-8"))
+            message = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             self._error(HTTPStatus.BAD_REQUEST, "JSON inválido.", -32700)
             return
