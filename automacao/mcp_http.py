@@ -68,17 +68,36 @@ operado de volta e, se a tela mudou, recusam toques por coordenada; leia a tela 
 Se o celular não estiver conectado, as ferramentas avisam: peça ao usuário para abrir o app."""
 
 
-class FerramentasComCelular:
-    """Junta as ferramentas do navegador com as do celular (android_*), repassadas pela Ponte."""
+INSTRUCTIONS_PC = """\
+Ferramentas pc_* operam o PC Windows do usuário pela ponte que ele liga à mão (ponte_pc.py); com a ponte \
+desligada, avisam que o PC não está conectado. Comece com pc_screenshot; as coordenadas são pixels dessa \
+captura. Teclas e digitação vão para a janela em foco: clique na janela certa antes de digitar."""
 
-    def __init__(self, ferramentas: Ferramentas, ponte: Ponte) -> None:
+NAO_CONECTADO_PC = ("O PC não está conectado. No PC, rode a ponte (python ponte_pc.py na pasta "
+                    "automacao-pc-browser) e deixe a janela aberta enquanto usar as ferramentas pc_*.")
+
+
+def pc_tools(args: argparse.Namespace) -> list[dict]:
+    """Esquemas das ferramentas pc_* (o driver roda no PC, pela ponte; aqui só a lista)."""
+    tools = Ferramentas(argparse.Namespace(**{**vars(args), "modo": "pc"})).tools
+    for tool in tools:
+        tool["description"] = tool["description"].replace(
+            "[Tela, mouse e teclado reais do PC]", "[PC do usuário, pela ponte ligada à mão]")
+    return tools
+
+
+class FerramentasComPontes:
+    """Junta as ferramentas do navegador com as dos aparelhos ligados por ponte (android_*, pc_*)."""
+
+    def __init__(self, ferramentas: Any, pontes: dict[str, tuple[Ponte, list[dict]]]) -> None:
         self.ferramentas = ferramentas
-        self.ponte = ponte
-        self.tools = ferramentas.tools + celular_tools()
+        self.pontes = pontes
+        self.tools = list(ferramentas.tools) + [t for _, tools in pontes.values() for t in tools]
 
     def call(self, name: str, arguments: dict) -> tuple[list[dict], bool]:
-        if name.startswith("android_"):
-            return self.ponte.call(name, arguments)
+        for prefixo, (ponte, _) in self.pontes.items():
+            if name.startswith(prefixo):
+                return ponte.call(name, arguments)
         return self.ferramentas.call(name, arguments)
 
     def close(self) -> None:
@@ -88,10 +107,11 @@ class FerramentasComCelular:
 class ServidorHTTP(ServidorMCP):
     """Reaproveita o despacho JSON-RPC do servidor stdio; só o transporte muda."""
 
-    def __init__(self, ferramentas: Any, modo: str, celular: bool = False) -> None:
+    def __init__(self, ferramentas: Any, modo: str, celular: bool = False, pc: bool = False) -> None:
         super().__init__(ferramentas, None, None)  # type: ignore[arg-type] - sem stdin/stdout
         self.modo = modo
         self.celular = celular
+        self.pc = pc
         self.iniciado = time.monotonic()
         self._avisou_inicio = False
         self._lock_inicio = threading.Lock()
@@ -115,6 +135,8 @@ class ServidorHTTP(ServidorMCP):
             result["instructions"] = INSTRUCTIONS_BROWSER
         if self.celular:
             result["instructions"] += "\n" + INSTRUCTIONS_CELULAR
+        if self.pc:
+            result["instructions"] += "\n" + INSTRUCTIONS_PC
         return result
 
 
@@ -126,6 +148,7 @@ class Handler(BaseHTTPRequestHandler):
     # preenchidos em make_server
     mcp: ServidorHTTP
     ponte: Ponte
+    ponte_pc: Ponte
     sessoes: Sessoes | None
     token: str | None
     origins: set[str]
@@ -161,11 +184,11 @@ class Handler(BaseHTTPRequestHandler):
         self._json(status, {"jsonrpc": "2.0", "id": None, "error": {"code": code, "message": message}})
 
     def _route(self) -> str | None:
-        """"mcp" ou "celular" quando o caminho é um endpoint e a autenticação confere; None quando já respondeu."""
+        """Nome do endpoint ("mcp", "celular", "pc") se a autenticação confere; None quando já respondeu."""
         path = self.path.split("?", 1)[0].rstrip("/")
         if path == "/saude":
             return "saude"
-        endpoint = next((e for e in ("mcp", "celular") if path == "/" + e or path.startswith(f"/{e}/")), None)
+        endpoint = next((e for e in ("mcp", "celular", "pc") if path == "/" + e or path.startswith(f"/{e}/")), None)
         if endpoint is None:
             self._send(HTTPStatus.NOT_FOUND)
             return None
@@ -239,12 +262,17 @@ class Handler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.METHOD_NOT_ALLOWED, headers={"Allow": "POST"})
         elif route == "celular":
             if self.mcp.celular:
-                self._celular()
+                self._aparelho(self.ponte)
+            else:
+                self._send(HTTPStatus.NOT_FOUND)
+        elif route == "pc":
+            if self.mcp.pc:
+                self._aparelho(self.ponte_pc)
             else:
                 self._send(HTTPStatus.NOT_FOUND)
 
-    def _celular(self) -> None:
-        """Aceita o WebSocket do app Android e atende até a conexão cair."""
+    def _aparelho(self, ponte: Ponte) -> None:
+        """Aceita o WebSocket do app Android ou da ponte do PC e atende até a conexão cair."""
         key = self.headers.get("Sec-WebSocket-Key", "")
         if "websocket" not in self.headers.get("Upgrade", "").lower() or not key:
             self._send(HTTPStatus.UPGRADE_REQUIRED, headers={"Upgrade": "websocket"})
@@ -256,7 +284,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.flush()
         self.close_connection = True
-        self.ponte.atender(ConexaoWS(self.connection, self.rfile, self.wfile))
+        ponte.atender(ConexaoWS(self.connection, self.rfile, self.wfile))
 
     def do_DELETE(self) -> None:  # noqa: N802
         route = self._route()
@@ -272,7 +300,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         route = self._route()
         if route != "mcp":
-            if route is not None:  # /saude ou /celular
+            if route is not None:  # /saude, /celular ou /pc
                 self._send(HTTPStatus.METHOD_NOT_ALLOWED, headers={"Allow": "GET"})
             return
         # Versão desconhecida no cabeçalho não é recusada: clientes mais novos ainda falam o mesmo despacho.
@@ -323,6 +351,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sem-token", action="store_true", help="dispensa o token; só aceito com --host 127.0.0.1")
     p.add_argument("--sem-celular", dest="celular", action="store_false",
                    help="não expõe as ferramentas android_* nem o endpoint /celular do app Android")
+    p.add_argument("--sem-pc", dest="pc_remoto", action="store_false",
+                   help="não expõe as ferramentas pc_* nem o endpoint /pc da ponte do PC")
     p.add_argument("--sem-isolamento", dest="isolar", action="store_false",
                    default=os.environ.get("ISOLAR_SESSOES", "1") != "0",
                    help="um navegador só para todas as sessões (padrão: um contexto isolado por Mcp-Session-Id; "
@@ -349,13 +379,22 @@ def load_token(args: argparse.Namespace) -> str | None:
 
 def make_server(args: argparse.Namespace, token: str | None) -> tuple[ThreadingHTTPServer, Any]:
     ponte = Ponte()
+    ponte_pc = Ponte(nome="PC", prefixo="pc_", nao_conectado=NAO_CONECTADO_PC, espera_reconexao=4.0,
+                     aviso_reconexao="O servidor acabou de iniciar e a ponte do PC ainda não reconectou. ")
+    pc = args.pc_remoto and args.modo == "browser"
     sessoes = Sessoes(args) if args.isolar and args.modo == "browser" else None
     ferramentas: Any = sessoes if sessoes is not None else Ferramentas(args)
+    pontes: dict[str, tuple[Ponte, list[dict]]] = {}
     if args.celular:
-        ferramentas = FerramentasComCelular(ferramentas, ponte)
+        pontes["android_"] = (ponte, celular_tools())
+    if pc:
+        pontes["pc_"] = (ponte_pc, pc_tools(args))
+    if pontes:
+        ferramentas = FerramentasComPontes(ferramentas, pontes)
     handler = type("BoundHandler", (Handler,), {
-        "mcp": ServidorHTTP(ferramentas, args.modo, args.celular),
+        "mcp": ServidorHTTP(ferramentas, args.modo, args.celular, pc),
         "ponte": ponte,
+        "ponte_pc": ponte_pc,
         "sessoes": sessoes,
         "token": token,
         "origins": {o.strip().rstrip("/") for o in args.origens_permitidas.split(",") if o.strip()},

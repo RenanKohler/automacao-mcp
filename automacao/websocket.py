@@ -1,7 +1,8 @@
 """Cliente WebSocket mínimo (RFC 6455) sobre a biblioteca padrão.
 
-Suficiente para falar com o Chrome DevTools Protocol em ws://127.0.0.1: apenas cliente,
-sem extensões, sem TLS. Envia frames de texto mascarados e remonta mensagens fragmentadas.
+Suficiente para falar com o Chrome DevTools Protocol em ws://127.0.0.1 e, com TLS (wss://), com o
+servidor da nuvem (ponte do PC): apenas cliente, sem extensões. Envia frames de texto mascarados e
+remonta mensagens fragmentadas.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ import base64
 import hashlib
 import os
 import socket
+import ssl
 import struct
 import threading
 from urllib.parse import urlsplit
@@ -30,27 +32,30 @@ class WebSocketClosed(WebSocketError):
 class WebSocket:
     def __init__(self, url: str, timeout: float = 10.0) -> None:
         parts = urlsplit(url)
-        if parts.scheme != "ws":
+        if parts.scheme not in ("ws", "wss"):
             raise WebSocketError(f"esquema não suportado: {parts.scheme}")
+        tls = parts.scheme == "wss"
         host = parts.hostname or "127.0.0.1"
-        port = parts.port or 80
+        port = parts.port or (443 if tls else 80)
         path = parts.path or "/"
         if parts.query:
             path += "?" + parts.query
 
         self._sock = socket.create_connection((host, port), timeout=timeout)
         self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        if tls:
+            self._sock = ssl.create_default_context().wrap_socket(self._sock, server_hostname=host)
         self._send_lock = threading.Lock()
         self._buffer = b""
         self.closed = False
-        self._handshake(host, port, path)
+        self._handshake(host if parts.port is None and (tls or port == 80) else f"{host}:{port}", path)
         self._sock.settimeout(None)
 
-    def _handshake(self, host: str, port: int, path: str) -> None:
+    def _handshake(self, host: str, path: str) -> None:
         key = base64.b64encode(os.urandom(16)).decode()
         request = (
             f"GET {path} HTTP/1.1\r\n"
-            f"Host: {host}:{port}\r\n"
+            f"Host: {host}\r\n"
             "Upgrade: websocket\r\n"
             "Connection: Upgrade\r\n"
             f"Sec-WebSocket-Key: {key}\r\n"

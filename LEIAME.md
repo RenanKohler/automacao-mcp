@@ -5,7 +5,7 @@ Roda um Chromium headless num container e expõe as ferramentas `browser_*` por 
 para usar como conector personalizado no claude.ai (web, desktop e celular) sem depender do PC.
 
 Limites: o navegador da nuvem não tem os seus logins, cookies nem acesso à sua rede local.
-As ferramentas `pc_*` e `android_*` continuam só no PC.
+O celular (`android_*`) e o PC (`pc_*`) entram pelo mesmo conector, cada um com a sua ponte (abaixo).
 
 ## Testar localmente (no PC, dentro desta pasta)
 
@@ -80,7 +80,20 @@ abra Informações do app > ⋮ > Permitir configurações restritas. Permita ta
 
 Teste da ponte no servidor, sem celular: `python -m testes.teste_celular`.
 
-### Assinatura do APK
+## PC pelo claude.ai (ponte ligada à mão)
+
+As ferramentas `pc_*` aparecem no conector, mas só funcionam enquanto a ponte roda no PC. Na pasta
+`automacao-pc-browser`, com o token em `nuvem\.mcp_token`:
+
+    .venv\Scripts\python ponte_pc.py
+
+A ponte abre uma conexão de saída para `wss://<servidor>/pc/<token>` (sem abrir portas no roteador) e
+executa captura, mouse e teclado no PC. Com a janela fechada, as ferramentas respondem "O PC não está
+conectado". Quem tiver a URL do conector controla o PC enquanto a ponte estiver ligada; deixe as
+ferramentas `pc_*` com aprovação a cada uso no claude.ai. `--sem-pc` no servidor remove as ferramentas.
+Teste com um PC simulado: `python -m testes.teste_ponte_pc`.
+
+## Assinatura do APK do celular
 
 A chave de assinatura fica nos segredos do repositório (`ANDROID_KEYSTORE_B64` e `ANDROID_KEYSTORE_SENHA`),
 nunca no código. Para criá-la, uma vez, no PC: `python android/gerar_chave.py` (precisa do pacote

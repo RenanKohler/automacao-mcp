@@ -216,9 +216,21 @@ def _unmask(data: bytes, mask: bytes) -> bytes:
 
 
 class Ponte:
-    """Guarda a conexão do celular (uma por vez) e casa cada pedido com a resposta."""
+    """Guarda a conexão do aparelho (uma por vez) e casa cada pedido com a resposta.
 
-    def __init__(self) -> None:
+    Atende o app do celular (ferramentas android_*) e também a ponte do PC (pc_*, ver ponte_pc.py):
+    a ponte do PC responde com o conteúdo MCP pronto, em "conteudo".
+    """
+
+    def __init__(self, nome: str = "celular", prefixo: str = "android_", nao_conectado: str = NAO_CONECTADO,
+                 espera_reconexao: float = ESPERA_RECONEXAO, aviso_reconexao: str = "") -> None:
+        self.nome = nome
+        self.prefixo = prefixo
+        self.nao_conectado = nao_conectado
+        self.espera_reconexao = espera_reconexao
+        self.aviso_reconexao = aviso_reconexao or (
+            "O servidor acabou de iniciar e o celular ainda não reconectou. O app tenta de novo sozinho a cada "
+            "30 s no máximo; tente de novo em instantes. ")
         self._lock = threading.Lock()
         self._conn: ConexaoWS | None = None
         self._pending: dict[int, list] = {}
@@ -242,7 +254,7 @@ class Ponte:
         if old is not None:
             log.info("nova conexão do celular substitui a anterior")
             old.close()
-        log.info("celular conectado")
+        log.info("%s conectado", self.nome)
         self._conectou.set()
         stop = threading.Event()
         threading.Thread(target=self._pinger, args=(conn, stop), daemon=True).start()
@@ -257,7 +269,7 @@ class Ponte:
                     continue
                 if message.get("tipo") == "ola":
                     self.info = {k: v for k, v in message.items() if k != "tipo"}
-                    log.info("celular: %s", json.dumps(self.info, ensure_ascii=False)[:200])
+                    log.info("%s: %s", self.nome, json.dumps(self.info, ensure_ascii=False)[:200])
                     continue
                 with self._lock:
                     waiter = self._pending.get(message.get("id"))
@@ -265,7 +277,7 @@ class Ponte:
                     waiter[1] = message
                     waiter[0].set()
         except ConexaoFechada as exc:
-            log.info("celular desconectado: %s", exc)
+            log.info("%s desconectado: %s", self.nome, exc)
         finally:
             stop.set()
             conn.close()
@@ -290,7 +302,7 @@ class Ponte:
         with self._lock:
             conn = self._conn
             if conn is None or conn.closed:
-                raise CelularError(NAO_CONECTADO)
+                raise CelularError(self.nao_conectado)
             self._next_id += 1
             msg_id = self._next_id
             waiter: list = [threading.Event(), None]
@@ -299,11 +311,11 @@ class Ponte:
             try:
                 conn.send_text(json.dumps({"id": msg_id, "acao": acao, "args": args}, ensure_ascii=False))
             except ConexaoFechada:
-                raise CelularError(NAO_CONECTADO) from None
+                raise CelularError(self.nao_conectado) from None
             if not waiter[0].wait(timeout):
                 raise CelularError(f"O celular não respondeu em {timeout:.0f} s.")
             if waiter[1] is None:
-                raise CelularError("A conexão com o celular caiu durante o comando. " + NAO_CONECTADO)
+                raise CelularError(f"A conexão com o {self.nome} caiu durante o comando. " + self.nao_conectado)
             return waiter[1]
         finally:
             with self._lock:
@@ -313,20 +325,23 @@ class Ponte:
 
     def call(self, name: str, arguments: dict) -> tuple[list[dict], bool]:
         try:
-            if name == "android_status":
+            if name == "android_status" and self.prefixo == "android_":
                 return [{"type": "text", "text": self._status()}], False
-            if name == "android_wait":
+            if name == "android_wait" and self.prefixo == "android_":
                 seconds = max(0.0, min(float(arguments.get("seconds", 1)), 30.0))
                 time.sleep(seconds)
                 return [{"type": "text", "text": f"Aguardou {seconds:g} s."}], False
             self._esperar_reconexao()
-            reply = self.pedir(name.removeprefix("android_"), arguments)
+            reply = self.pedir(name.removeprefix(self.prefixo), arguments)
         except CelularError as exc:
             return [{"type": "text", "text": str(exc)}], True
         except (TypeError, ValueError) as exc:
             return [{"type": "text", "text": f"Argumentos inválidos: {exc}"}], True
+        conteudo = reply.get("conteudo")
+        if isinstance(conteudo, list) and conteudo:
+            return conteudo, not reply.get("ok")
         if not reply.get("ok"):
-            return [{"type": "text", "text": str(reply.get("erro") or "Falha no celular.")}], True
+            return [{"type": "text", "text": str(reply.get("erro") or f"Falha no {self.nome}.")}], True
         content: list[dict] = []
         image = reply.get("imagem")
         if isinstance(image, dict) and image.get("data"):
@@ -339,14 +354,13 @@ class Ponte:
         """Servidor recém-acordado: dá tempo ao app de reconectar (ele tenta de novo a cada 30 s no máximo)."""
         if self.conectado or time.monotonic() - self.iniciado > JANELA_RECONEXAO:
             return
-        if not self._conectou.wait(ESPERA_RECONEXAO) or not self.conectado:
-            raise CelularError("O servidor acabou de iniciar e o celular ainda não reconectou. O app tenta de novo "
-                               "sozinho a cada 30 s no máximo; tente de novo em instantes. " + NAO_CONECTADO)
+        if not self._conectou.wait(self.espera_reconexao) or not self.conectado:
+            raise CelularError(self.aviso_reconexao + self.nao_conectado)
         time.sleep(0.5)  # o "olá" do app chega logo depois da conexão
 
     def _status(self) -> str:
         if not self.conectado:
-            return NAO_CONECTADO
+            return self.nao_conectado
         info = self.info
         parts = [f"Celular conectado há {int(time.time() - self.connected_at)} s"]
         if info.get("modelo"):

@@ -141,7 +141,7 @@ def main() -> int:
         status, headers, body = http("POST", base + "/mcp", init, auth)
         result = json.loads(body)["result"]
         check("initialize com Bearer", status == 200 and result["protocolVersion"] == "2025-06-18", result.get("serverInfo"))
-        check("instruções do modo navegador", "remoto" in result["instructions"] and "pc_" not in result["instructions"])
+        check("instruções do modo navegador", "remoto" in result["instructions"] and "ponte" in result["instructions"])
         status, _, body = http("POST", f"{base}/mcp/{token}", init)
         check("initialize com token no caminho", status == 200 and "result" in json.loads(body))
 
@@ -189,7 +189,8 @@ def main() -> int:
         replies = json.loads(body)
         check("lote: só respostas de pedidos", status == 200 and [r["id"] for r in replies] == [2, 3], status)
         tools = {t["name"] for t in replies[1]["result"]["tools"]}
-        check("navegador e celular, sem PC", tools and all(n.startswith(("browser_", "android_")) for n in tools), len(tools))
+        check("navegador, celular e PC pela ponte", tools and "pc_screenshot" in tools
+              and all(n.startswith(("browser_", "android_", "pc_")) for n in tools), len(tools))
 
         def call(name: str, **arguments) -> dict:
             msg = {"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": name, "arguments": arguments}}
