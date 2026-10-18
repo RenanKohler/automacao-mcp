@@ -148,6 +148,7 @@ class NavegadorCDP(BetaAbstractBrowserToolset20260801):
         chrome_path: str | None = None,
         cdp_endpoint: str | None = None,
         download_dir: str | None = None,
+        browser_context_id: str | None = None,
         **options: Any,
     ) -> None:
         # read_console e read_network vêm desativados no SDK; este driver os oferece por padrão.
@@ -168,6 +169,9 @@ class NavegadorCDP(BetaAbstractBrowserToolset20260801):
         self._changes: list[Any] = []
         self._downloads: dict[str, dict] = {}
         self._initialized = False
+        # Com um contexto (perfil isolado, como uma janela anônima), este driver só enxerga as próprias abas;
+        # vários drivers podem dividir o mesmo Chrome, cada um no seu contexto.
+        self.browser_context_id = browser_context_id
 
         self._chrome: ChromeProcess | None = None
         if cdp_endpoint:
@@ -186,17 +190,24 @@ class NavegadorCDP(BetaAbstractBrowserToolset20260801):
 
     # ------------------------------------------------------------------ inicialização
 
+    def _mine(self, info: dict) -> bool:
+        return self.browser_context_id is None or info.get("browserContextId") == self.browser_context_id
+
+    def _context_param(self) -> dict:
+        return {"browserContextId": self.browser_context_id} if self.browser_context_id else {}
+
     def _start(self) -> None:
         send = self.conn.send
         if self.download_dir:
             self.download_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
             send("Browser.setDownloadBehavior",
-                 {"behavior": "allowAndName", "downloadPath": str(self.download_dir), "eventsEnabled": True})
+                 {"behavior": "allowAndName", "downloadPath": str(self.download_dir), "eventsEnabled": True,
+                  **self._context_param()})
         else:
-            send("Browser.setDownloadBehavior", {"behavior": "deny", "eventsEnabled": True})
+            send("Browser.setDownloadBehavior", {"behavior": "deny", "eventsEnabled": True, **self._context_param()})
         send("Target.setDiscoverTargets", {"discover": True})
         send("Target.setAutoAttach", {"autoAttach": True, "waitForDebuggerOnStart": True, "flatten": True})
-        targets = send("Target.getTargets").get("targetInfos", [])
+        targets = [t for t in send("Target.getTargets").get("targetInfos", []) if self._mine(t)]
         for info in targets:
             if info.get("type") == "page" and not info.get("attached"):
                 try:
@@ -204,7 +215,7 @@ class NavegadorCDP(BetaAbstractBrowserToolset20260801):
                 except CDPError:
                     pass
         if not any(t.get("type") == "page" for t in targets):
-            send("Target.createTarget", {"url": "about:blank"})
+            send("Target.createTarget", {"url": "about:blank", **self._context_param()})
         deadline = time.monotonic() + 15
         with self._changed:
             while not any(t.ready.is_set() for t in self._tabs.values()):
@@ -275,6 +286,10 @@ class NavegadorCDP(BetaAbstractBrowserToolset20260801):
             return
         if method == "Target.attachedToTarget":
             info = params["targetInfo"]
+            if session_id is None and not self._mine(info):
+                # Aba de outro contexto (outra sessão no mesmo Chrome): quem a criou cuida dela.
+                self.conn.send_nowait("Target.detachFromTarget", {"sessionId": params["sessionId"]})
+                return
             if info.get("type") == "page":
                 self._setup_page(params["sessionId"], info, params.get("waitingForDebugger", False))
             elif info.get("type") == "service_worker":
@@ -640,7 +655,7 @@ class NavegadorCDP(BetaAbstractBrowserToolset20260801):
         return BetaBrowserNavigateResult(url=tab.url, status=status, title=tab.title)
 
     def new_tab(self, context: BetaToolsetCallContext, input: Any) -> BetaBrowserStateTabEntryParam:
-        target_id = self.conn.send("Target.createTarget", {"url": "about:blank"})["targetId"]
+        target_id = self.conn.send("Target.createTarget", {"url": "about:blank", **self._context_param()})["targetId"]
         deadline = time.monotonic() + 15
         with self._changed:
             while not ((tab := self._by_target.get(target_id)) and tab.ready.is_set()):

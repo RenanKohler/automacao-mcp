@@ -58,7 +58,11 @@ Teste sem rede: `python -m testes.teste_trocar_token`.
     docker run -p 8000:8000 -e MCP_TOKEN=<token de 32+ caracteres> automacao-mcp
 
 Endpoint `/mcp` (token no cabeçalho `Authorization: Bearer` ou no caminho `/mcp/<token>`), saúde em `/saude`.
-Sem estado de sessão: todos os clientes compartilham o mesmo navegador; serve a um único usuário.
+Cada sessão MCP (`Mcp-Session-Id`, criado no initialize) tem um navegador isolado: abas, cookies e
+armazenamento próprios, num contexto separado do mesmo Chrome. No máximo 2 sessões com navegador ao mesmo
+tempo (memória do plano gratuito); a terceira recebe erro de capacidade. Uma sessão parada por 10 minutos
+tem o navegador fechado. Para voltar a um navegador único para todos: `ISOLAR_SESSOES=0` no Render
+(ou `--sem-isolamento`). Teste: `python -m testes.teste_sessoes`.
 
 ## Celular Android sem PC (app Automação)
 

@@ -6,8 +6,11 @@ Expõe as mesmas ferramentas de `mcp_servidor` (browser_*, e pc_* se o modo pedi
     GET  /mcp            405: o servidor não abre fluxo próprio de eventos
     GET  /saude          verificação de saúde, sem autenticação (para o orquestrador do container)
 
-O servidor não guarda sessão (não emite Mcp-Session-Id): cada POST é independente e todos os
-clientes compartilham o mesmo navegador. Serve a um único usuário.
+Sessões: o initialize devolve um Mcp-Session-Id e cada sessão tem um navegador isolado (contexto
+próprio no mesmo Chrome; ver sessoes.py). Pedidos sem o cabeçalho usam uma sessão padrão; um id
+desconhecido (por exemplo, depois de o servidor reiniciar) vira uma sessão nova, sem erro.
+DELETE /mcp com o cabeçalho encerra a sessão. --sem-isolamento (ou ISOLAR_SESSOES=0) volta ao modo
+antigo, com um navegador só para todos. Serve a um único usuário.
 
 Autenticação obrigatória por token, de duas formas equivalentes:
     - cabeçalho "Authorization: Bearer <token>" (Claude Code, clientes que aceitam cabeçalhos);
@@ -23,6 +26,7 @@ from __future__ import annotations
 import argparse
 import hmac
 import json
+import secrets
 import logging
 import os
 import signal
@@ -35,6 +39,7 @@ from typing import Any
 
 from .celular import ConexaoWS, Ponte, accept_key, mcp_tools as celular_tools
 from .mcp_servidor import PROTOCOL_VERSIONS, Ferramentas, ServidorMCP, build_parser as build_stdio_parser
+from .sessoes import Sessoes, atual as sessao_atual
 
 log = logging.getLogger("automacao.mcp_http")
 
@@ -121,6 +126,7 @@ class Handler(BaseHTTPRequestHandler):
     # preenchidos em make_server
     mcp: ServidorHTTP
     ponte: Ponte
+    sessoes: Sessoes | None
     token: str | None
     origins: set[str]
 
@@ -147,8 +153,9 @@ class Handler(BaseHTTPRequestHandler):
         if body:
             self.wfile.write(body)
 
-    def _json(self, status: int, payload: Any) -> None:
-        self._send(status, json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    def _json(self, status: int, payload: Any, headers: dict[str, str] | None = None) -> None:
+        self._send(status, json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+                   headers=headers)
 
     def _error(self, status: int, message: str, code: int = -32600) -> None:
         self._json(status, {"jsonrpc": "2.0", "id": None, "error": {"code": code, "message": message}})
@@ -253,8 +260,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:  # noqa: N802
         route = self._route()
-        if route is not None:
-            self._send(HTTPStatus.METHOD_NOT_ALLOWED, headers={"Allow": "POST" if route == "mcp" else "GET"})
+        if route is None:
+            return
+        sid = self.headers.get("Mcp-Session-Id", "").strip()
+        if route == "mcp" and self.sessoes is not None and sid:
+            self.sessoes.encerrar(sid)
+            self._send(HTTPStatus.NO_CONTENT)
+            return
+        self._send(HTTPStatus.METHOD_NOT_ALLOWED, headers={"Allow": "POST" if route == "mcp" else "GET"})
 
     def do_POST(self) -> None:  # noqa: N802
         route = self._route()
@@ -282,11 +295,20 @@ class Handler(BaseHTTPRequestHandler):
         if not batch or not all(isinstance(m, dict) for m in batch):
             self._error(HTTPStatus.BAD_REQUEST, "Mensagem JSON-RPC inválida.")
             return
-        replies = [r for r in (self.mcp.handle(m) for m in batch) if r is not None]
+        headers: dict[str, str] = {}
+        sid = self.headers.get("Mcp-Session-Id", "").strip()[:128] or None
+        if self.sessoes is not None and sid is None and any(m.get("method") == "initialize" for m in batch):
+            sid = secrets.token_urlsafe(18)
+            headers["Mcp-Session-Id"] = sid
+        sessao_atual.sessao = sid
+        try:
+            replies = [r for r in (self.mcp.handle(m) for m in batch) if r is not None]
+        finally:
+            sessao_atual.sessao = None
         if not replies:  # só notificações ou respostas
-            self._send(HTTPStatus.ACCEPTED)
+            self._send(HTTPStatus.ACCEPTED, headers=headers)
         else:
-            self._json(HTTPStatus.OK, replies if isinstance(message, list) else replies[0])
+            self._json(HTTPStatus.OK, replies if isinstance(message, list) else replies[0], headers)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -301,6 +323,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sem-token", action="store_true", help="dispensa o token; só aceito com --host 127.0.0.1")
     p.add_argument("--sem-celular", dest="celular", action="store_false",
                    help="não expõe as ferramentas android_* nem o endpoint /celular do app Android")
+    p.add_argument("--sem-isolamento", dest="isolar", action="store_false",
+                   default=os.environ.get("ISOLAR_SESSOES", "1") != "0",
+                   help="um navegador só para todas as sessões (padrão: um contexto isolado por Mcp-Session-Id; "
+                        "também desliga com ISOLAR_SESSOES=0)")
     p.add_argument("--origens-permitidas", default="",
                    help="valores de Origin aceitos, separados por vírgula; pedidos com outra Origin são recusados")
     return p
@@ -323,12 +349,14 @@ def load_token(args: argparse.Namespace) -> str | None:
 
 def make_server(args: argparse.Namespace, token: str | None) -> tuple[ThreadingHTTPServer, Any]:
     ponte = Ponte()
-    ferramentas = Ferramentas(args)
+    sessoes = Sessoes(args) if args.isolar and args.modo == "browser" else None
+    ferramentas: Any = sessoes if sessoes is not None else Ferramentas(args)
     if args.celular:
         ferramentas = FerramentasComCelular(ferramentas, ponte)
     handler = type("BoundHandler", (Handler,), {
         "mcp": ServidorHTTP(ferramentas, args.modo, args.celular),
         "ponte": ponte,
+        "sessoes": sessoes,
         "token": token,
         "origins": {o.strip().rstrip("/") for o in args.origens_permitidas.split(",") if o.strip()},
     })

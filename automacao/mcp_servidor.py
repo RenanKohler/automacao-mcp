@@ -208,7 +208,6 @@ class Ferramentas:
         if self._browser is None:
             from anthropic.tools.browser import BetaLocalFilePolicy
 
-            from .navegador import NavegadorCDP
             from .politica import URLPolicy
 
             a = self.args
@@ -223,10 +222,16 @@ class Ferramentas:
                                                   expose_download_paths=False)
             policy = URLPolicy(allowed_hosts=[h for h in a.hosts_permitidos.split(",") if h.strip()],
                                allow_private=a.permitir_rede_local)
-            self._browser = NavegadorCDP(url_policy=policy, headless=a.headless, viewport=(width, height),
-                                         chrome_path=a.chrome_path, cdp_endpoint=a.cdp, download_dir=a.downloads,
-                                         configs=configs, file_policy=file_policy, confirm=self._approved)
+            self._browser = self._criar_navegador(
+                url_policy=policy, headless=a.headless, viewport=(width, height), chrome_path=a.chrome_path,
+                cdp_endpoint=a.cdp, download_dir=a.downloads, configs=configs, file_policy=file_policy,
+                confirm=self._approved)
         return self._browser
+
+    def _criar_navegador(self, **kwargs: Any) -> Any:
+        from .navegador import NavegadorCDP
+
+        return NavegadorCDP(**kwargs)
 
     def _pc_toolset(self) -> Any:
         if self._pc is None:
