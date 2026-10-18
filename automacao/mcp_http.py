@@ -61,8 +61,10 @@ Coordenadas são pixels do viewport, o mesmo referencial de browser_screenshot.
 
 INSTRUCTIONS_CELULAR = """\
 Ferramentas android_* operam o celular Android do usuário pelo app Automação (driver nativo, sem PC). \
-Comece abrindo o app com android_open_app e leia a tela com android_ui. Prefira tocar por texto ou id \
-(android_tap com texto) a coordenadas. android_type acha o campo sozinho; não toque no teclado. \
+Comece abrindo o app com android_open_app (ou direto na tela certa com android_open_url) e leia a tela \
+com android_ui. Prefira tocar por texto ou id (android_tap com texto) a coordenadas. android_type acha o campo \
+sozinho; não toque no teclado. Para fluxos previsíveis, junte os passos numa única android_sequence, que já \
+devolve a tela no final; para esperar carregamentos, use android_wait_for em vez de pausas fixas. \
 Se o usuário acompanha pelo app Claude no mesmo celular, o Claude pode tomar a frente: as ações trazem o app \
 operado de volta e, se a tela mudou, recusam toques por coordenada; leia a tela de novo e repita. \
 Se o celular não estiver conectado, as ferramentas avisam: peça ao usuário para abrir o app."""

@@ -35,6 +35,9 @@ CALL_TIMEOUT = 45.0
 # Logo depois de o servidor subir (acordando da hibernação), espera o celular reconectar antes de desistir.
 JANELA_RECONEXAO = float(os.environ.get("AUTOMACAO_JANELA_RECONEXAO", "120"))
 ESPERA_RECONEXAO = float(os.environ.get("AUTOMACAO_ESPERA_RECONEXAO", "35"))
+MAX_PASSOS = 25           # o app recusa sequências maiores
+MAX_ESPERA_S = 30.0       # limite de android_wait_for
+MAX_PAUSA_PASSO_S = 10.0  # limite de um passo "wait" dentro de android_sequence
 
 NAO_CONECTADO = ("O celular não está conectado. Abra o app Automação no celular, confira se o serviço de "
                  "acessibilidade está ligado e se o endereço do servidor está correto.")
@@ -100,8 +103,49 @@ TOOLS: list[dict[str, Any]] = [
      "description": "Lista os apps do celular que podem ser abertos, com nome e pacote."},
     {"name": "android_wait", "read_only": True,
      "schema": {"type": "object", "properties": {"seconds": {"type": "number"}}, "required": ["seconds"]},
-     "description": "Aguarda alguns segundos (até 30) para a tela do celular carregar."},
+     "description": "Aguarda alguns segundos (até 30). Prefira android_wait_for, que termina assim que a tela fica "
+                    "pronta."},
+    {"name": "android_wait_for", "read_only": True,
+     "schema": {"type": "object", "properties": {
+         "texto": {"type": "string", "description": "Texto ou descrição do elemento (igual ou parcial, sem diferenciar "
+                                                    "maiúsculas)."},
+         "id": {"type": "string", "description": "id do elemento, como aparece em android_ui."},
+         "sumir": {"type": "boolean", "description": "true espera o elemento sumir (ex.: \"Carregando\"). Padrão false."},
+         "timeout_s": {"type": "number", "description": f"Limite em segundos (padrão 10, máximo {MAX_ESPERA_S:g})."},
+         "app": _APP}},
+     "description": "Espera um elemento aparecer (ou sumir) na tela do celular e retorna assim que isso acontece, "
+                    "consultando a tela a cada 200 ms. Se o limite estourar, retorna erro com a tela atual."},
+    {"name": "android_open_url", "read_only": False,
+     "schema": {"type": "object", "properties": {
+         "url": {"type": "string", "description": "Link ou URI: https://wa.me/5541999999999?text=oi, "
+                                                  "whatsapp://send?phone=5541999999999&text=oi, tel:..., geo:0,0?q=..., "
+                                                  "mailto:..., package:com.termux (com action de configuração)."},
+         "action": {"type": "string", "description": "Ação de intent do Android (padrão android.intent.action.VIEW), "
+                                                     "ex.: android.settings.WIFI_SETTINGS, "
+                                                     "android.settings.action.MANAGE_OVERLAY_PERMISSION, "
+                                                     "android.settings.APPLICATION_DETAILS_SETTINGS."},
+         "package": {"type": "string", "description": "Opcional: pacote que deve abrir o link, para evitar o seletor de "
+                                                      "apps (ex.: com.whatsapp)."}}},
+     "description": "Abre direto uma tela de app por link ou ação do sistema, sem navegar por menus. O app que abrir "
+                    "passa a ser o app operado. Não envia nada sozinho: em links de mensagem, o texto fica no campo e "
+                    "ainda é preciso tocar em enviar."},
+    {"name": "android_sequence", "read_only": False,
+     "schema": {"type": "object", "properties": {
+         "passos": {"type": "array", "maxItems": MAX_PASSOS, "description":
+                    "Ações em ordem. Cada passo é um objeto com \"acao\" e os mesmos argumentos da ferramenta "
+                    "correspondente. Ações: open_app, open_url, tap, long_press, swipe, type, key, wait (seconds, até "
+                    f"{MAX_PAUSA_PASSO_S:g}), wait_for e ui. Ex.: [{{\"acao\": \"open_app\", \"package\": \"com.whatsapp\"}}, "
+                    "{\"acao\": \"tap\", \"texto\": \"Maria\"}, {\"acao\": \"type\", \"text\": \"oi\"}].",
+                    "items": {"type": "object", "properties": {"acao": {"type": "string"}}, "required": ["acao"]}},
+         "ler_tela": {"type": "boolean", "description": "Devolve a tela ao final (padrão true), dispensando android_ui."},
+         "app": _APP},
+         "required": ["passos"]},
+     "description": "Executa vários passos seguidos no celular numa única chamada, sem voltar ao modelo entre eles. "
+                    "Para no primeiro passo que falhar e devolve o relato de cada passo e a tela atual. Use para fluxos "
+                    "previsíveis; inclua o toque final de envio só quando o envio já estiver autorizado."},
 ]
+
+_ACOES_SEQUENCIA = {"open_app", "open_url", "tap", "long_press", "swipe", "type", "key", "wait", "wait_for", "ui"}
 
 
 class CelularError(Exception):
@@ -331,8 +375,9 @@ class Ponte:
                 seconds = max(0.0, min(float(arguments.get("seconds", 1)), 30.0))
                 time.sleep(seconds)
                 return [{"type": "text", "text": f"Aguardou {seconds:g} s."}], False
+            timeout = _timeout(name, arguments)  # valida os passos antes de esperar ou enviar
             self._esperar_reconexao()
-            reply = self.pedir(name.removeprefix(self.prefixo), arguments)
+            reply = self.pedir(name.removeprefix(self.prefixo), arguments, timeout)
         except CelularError as exc:
             return [{"type": "text", "text": str(exc)}], True
         except (TypeError, ValueError) as exc:
@@ -372,6 +417,33 @@ class Ponte:
         if info.get("versao_app"):
             parts.append(f"app {info['versao_app']}")
         return ", ".join(parts) + "."
+
+
+def _timeout(name: str, arguments: dict) -> float:
+    """Tempo de espera pela resposta do celular: maior para ações que esperam a tela por conta própria."""
+    if name == "android_wait_for":
+        return CALL_TIMEOUT + min(float(arguments.get("timeout_s") or 10), MAX_ESPERA_S)
+    if name == "android_sequence":
+        passos = arguments.get("passos")
+        if not isinstance(passos, list) or not passos:
+            raise ValueError("passos deve ser uma lista não vazia de ações")
+        if len(passos) > MAX_PASSOS:
+            raise ValueError(f"no máximo {MAX_PASSOS} passos por sequência")
+        extra = 0.0
+        for i, passo in enumerate(passos, 1):
+            if not isinstance(passo, dict):
+                raise ValueError(f"o passo {i} não é um objeto")
+            acao = str(passo.get("acao", "")).removeprefix("android_")
+            if acao not in _ACOES_SEQUENCIA:
+                raise ValueError(f"passo {i}: ação {acao!r} não permitida; use {', '.join(sorted(_ACOES_SEQUENCIA))}")
+            if acao == "wait":
+                extra += min(float(passo.get("seconds") or 1), MAX_PAUSA_PASSO_S)
+            elif acao == "wait_for":
+                extra += min(float(passo.get("timeout_s") or 10), MAX_ESPERA_S)
+            else:
+                extra += 6.0  # toque, digitação ou abertura de app, com folga para trazer o app de volta
+        return CALL_TIMEOUT + extra
+    return CALL_TIMEOUT
 
 
 def mcp_tools() -> list[dict]:

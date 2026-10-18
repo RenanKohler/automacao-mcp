@@ -71,6 +71,16 @@ O servidor também expõe as ferramentas `android_*`, repassadas a um app que ro
 para `wss://<servidor>/celular/<token>` e executa os comandos: árvore da tela, captura (Android 11+),
 toque, toque longo, deslize, escrita com acentos, teclas do sistema, abrir e listar apps.
 
+Para reduzir idas e voltas ao modelo:
+- `android_sequence`: vários passos (open_app, open_url, tap, type, key, swipe, wait, wait_for, ui) numa
+  única chamada; para no primeiro erro e devolve o relato e a tela atual.
+- `android_wait_for`: espera um texto ou id aparecer (ou sumir) e retorna assim que acontece.
+- `android_open_url`: abre um link (`https://wa.me/...`, `tel:`, `geo:`) ou uma ação do sistema
+  (`android.settings.WIFI_SETTINGS`) direto na tela certa.
+
+Servidor e app precisam estar na mesma versão para usar as ferramentas novas; com o app antigo elas
+respondem "Ação não suportada pelo app".
+
 O GitHub Actions compila o APK a cada push em `android/` e publica em
 https://github.com/RenanKohler/automacao-mcp/releases/download/android/automacao-celular.apk
 

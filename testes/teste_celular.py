@@ -47,6 +47,12 @@ class CelularFalso:
                     reply = {"ok": True, "texto": f"Tocou em ({args['x']}, {args['y']})."}
                 elif acao == "type":
                     reply = {"ok": True, "texto": f"Escreveu {len(args['text'])} caracteres."}
+                elif acao == "sequence":
+                    reply = {"ok": True, "texto": f"Sequência de {len(args['passos'])} passos concluída em 0.1 s."}
+                elif acao == "wait_for":
+                    reply = {"ok": True, "texto": f"\"{args.get('texto')}\" apareceu após 0.2 s."}
+                elif acao == "open_url":
+                    reply = {"ok": True, "texto": f"Abriu {args['url']}; na frente está com.whatsapp."}
                 elif acao == "lento":
                     continue
                 else:
@@ -178,6 +184,32 @@ def main() -> int:
         check("erro do celular vira isError", r["isError"] and "não suportada" in text_of(r), text_of(r))
         r = call("android_wait", seconds=0.2)
         check("wait no servidor", not r["isError"])
+
+        # Sequência, espera por condição e abertura por link.
+        check("ferramentas novas listadas", {"android_sequence", "android_wait_for", "android_open_url"} <= tools, tools)
+        check("sequence exige passos", schemas["android_sequence"].get("required") == ["passos"])
+        passos = [{"acao": "open_app", "package": "com.whatsapp"}, {"acao": "tap", "texto": "Maria"},
+                  {"acao": "android_type", "text": "oi"}, {"acao": "wait_for", "texto": "Enviar", "timeout_s": 5}]
+        r = call("android_sequence", passos=passos)
+        check("sequência repassada", not r["isError"] and "4 passos" in text_of(r), text_of(r))
+        check("passos chegam intactos", celular.recebidos[-1]["acao"] == "sequence"
+              and celular.recebidos[-1]["args"]["passos"] == passos, celular.recebidos[-1])
+        enviados = len(celular.recebidos)
+        r = call("android_sequence", passos=[{"acao": "tap", "texto": "A"}, {"acao": "screenshot"}])
+        check("passo proibido recusado no servidor", r["isError"] and "passo 2" in text_of(r)
+              and len(celular.recebidos) == enviados, text_of(r))
+        r = call("android_sequence", passos=[])
+        check("sequência vazia recusada", r["isError"] and len(celular.recebidos) == enviados, text_of(r))
+        r = call("android_sequence", passos=[{"acao": "tap", "texto": str(i)} for i in range(26)])
+        check("sequência longa recusada", r["isError"] and "25" in text_of(r), text_of(r))
+        r = call("android_sequence", passos=["tap"])
+        check("passo que não é objeto recusado", r["isError"] and "passo 1" in text_of(r), text_of(r))
+        r = call("android_wait_for", texto="Enviar", timeout_s=3)
+        check("wait_for repassado", not r["isError"] and "apareceu" in text_of(r)
+              and celular.recebidos[-1]["args"] == {"texto": "Enviar", "timeout_s": 3}, text_of(r))
+        r = call("android_open_url", url="https://wa.me/5541999999999?text=oi", package="com.whatsapp")
+        check("open_url repassado", not r["isError"] and celular.recebidos[-1]["acao"] == "open_url"
+              and celular.recebidos[-1]["args"]["package"] == "com.whatsapp", text_of(r))
 
         # Chamadas em paralelo casam cada resposta com o seu pedido.
         results: dict[int, str] = {}
