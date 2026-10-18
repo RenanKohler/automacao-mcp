@@ -59,6 +59,45 @@ class CelularFalso:
         self.ws.close()
 
 
+def reconexao(check) -> None:
+    """Servidor recém-acordado: a chamada espera o celular reconectar em vez de falhar na hora."""
+    token = secrets.token_urlsafe(32)
+    port = free_port()
+    base = f"http://127.0.0.1:{port}"
+    env = {**os.environ, "MCP_TOKEN": token, "AUTOMACAO_JANELA_RECONEXAO": "120", "AUTOMACAO_ESPERA_RECONEXAO": "4"}
+    proc = start("--porta", str(port), "--headless", env=env)
+    auth = {"Authorization": f"Bearer {token}"}
+
+    def call(name: str, **arguments) -> dict:
+        msg = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}}
+        return json.loads(http("POST", base + "/mcp", msg, auth)[2])["result"]
+
+    celular = None
+    try:
+        wait_ready(base, proc)
+        t0 = time.monotonic()
+        r = call("android_tap", x=1, y=2)
+        texto = r["content"][0]["text"]
+        check("acordando sem celular: espera e explica", r["isError"] and "ainda não reconectou" in texto
+              and 3.5 < time.monotonic() - t0 < 10, texto)
+        resultado: dict = {}
+        worker = threading.Thread(target=lambda: resultado.update(call("android_tap", x=7, y=8)))
+        worker.start()
+        time.sleep(1)
+        celular = CelularFalso(f"ws://127.0.0.1:{port}/celular/{token}")
+        worker.join(15)
+        check("celular que reconecta durante a espera recebe o comando",
+              resultado and not resultado["isError"] and "(7, 8)" in resultado["content"][0]["text"], resultado)
+    finally:
+        if celular:
+            celular.close()
+        proc.terminate()
+        try:
+            proc.wait(timeout=20)
+        except Exception:  # noqa: BLE001
+            proc.kill()
+
+
 def main() -> int:
     failures: list[str] = []
 
@@ -70,7 +109,7 @@ def main() -> int:
     token = secrets.token_urlsafe(32)
     port = free_port()
     base = f"http://127.0.0.1:{port}"
-    env = {**os.environ, "MCP_TOKEN": token}
+    env = {**os.environ, "MCP_TOKEN": token, "AUTOMACAO_JANELA_RECONEXAO": "0"}
     proc = start("--porta", str(port), "--headless", env=env)
     auth = {"Authorization": f"Bearer {token}"}
 
@@ -99,6 +138,10 @@ def main() -> int:
               and not schemas["android_tap"].get("required"), schemas["android_tap"])
         check("type aceita app e ponto do campo", {"app", "x", "y", "id"} <= set(schemas["android_type"]["properties"]))
 
+        r = call("android_status")
+        check("primeira chamada avisa que o servidor acabou de iniciar", "acabou de iniciar" in text_of(r), text_of(r))
+        r = call("android_status")
+        check("só a primeira chamada avisa", "acabou de iniciar" not in text_of(r), text_of(r))
         r = call("android_tap", x=1, y=2)
         check("sem celular: erro claro", r["isError"] and "não está conectado" in text_of(r), text_of(r))
         r = call("android_status")
@@ -168,6 +211,7 @@ def main() -> int:
             proc.kill()
         log = proc.stderr.read()
     check("token fora do log", token.encode() not in log)
+    reconexao(check)
 
     print(f"\n{len(failures)} falha(s): {failures}" if failures else "\nTodos os testes passaram.")
     return 1 if failures else 0

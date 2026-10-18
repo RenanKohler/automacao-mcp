@@ -25,6 +25,15 @@ O script cria o Space público `<seu usuário>/automacao-mcp`, grava o token de 
 O código do Space fica público; o token não. No plano gratuito o Space dorme após 48 h sem uso e
 acorda na primeira chamada, que pode demorar cerca de um minuto.
 
+## Hibernação do plano gratuito
+
+O Render para o serviço após 15 minutos sem uso; a primeira chamada depois disso demora e o resultado
+avisa que o servidor acabou de iniciar. Nos primeiros 2 minutos, as ferramentas `android_*` esperam até
+35 s o app do celular reconectar (ele tenta de novo a cada 30 s no máximo) antes de dar erro.
+Para não hibernar num horário, crie a variável do repositório `MANTER_ACORDADO_HORARIO` (ex.: `7-23`,
+horário de Brasília) em Settings > Secrets and variables > Actions > Variables: o workflow
+"Manter o servidor acordado" chama `/saude` a cada 14 minutos nesse horário. Sem a variável, nada roda.
+
 ## Trocar o token (se a URL do conector vazar)
 
 No PC, com uma chave da API do Render (https://dashboard.render.com/u/settings#api-keys):

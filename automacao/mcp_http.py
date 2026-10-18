@@ -28,6 +28,7 @@ import os
 import signal
 import sys
 import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -41,6 +42,8 @@ MAX_BODY = 4 * 1024 * 1024
 # Versões aceitas no initialize; o despacho é o mesmo em todas (só ferramentas, sem recursos opcionais).
 HTTP_PROTOCOL_VERSIONS = ("2025-11-25",) + tuple(PROTOCOL_VERSIONS)
 MIN_TOKEN_LEN = 32
+# Até quanto tempo depois de subir a primeira chamada leva o aviso de que o servidor estava parado.
+AVISO_INICIO_S = 300
 
 INSTRUCTIONS_BROWSER = """\
 Ferramentas para operar um navegador Chrome headless, rodando num servidor remoto (browser_*). \
@@ -84,6 +87,20 @@ class ServidorHTTP(ServidorMCP):
         super().__init__(ferramentas, None, None)  # type: ignore[arg-type] - sem stdin/stdout
         self.modo = modo
         self.celular = celular
+        self.iniciado = time.monotonic()
+        self._avisou_inicio = False
+        self._lock_inicio = threading.Lock()
+
+    def _call(self, params: dict) -> dict:
+        result = super()._call(params)
+        with self._lock_inicio:
+            primeira, self._avisou_inicio = not self._avisou_inicio, True
+        decorrido = time.monotonic() - self.iniciado
+        if primeira and decorrido < AVISO_INICIO_S:
+            result["content"] = list(result["content"]) + [{"type": "text", "text": (
+                f"Aviso: o servidor estava parado e acabou de iniciar (há {decorrido:.0f} s); por isso esta primeira "
+                "chamada pode ter demorado. No plano gratuito ele hiberna após 15 minutos sem uso.")}]
+        return result
 
     def _initialize(self, params: dict) -> dict:
         result = super()._initialize(params)

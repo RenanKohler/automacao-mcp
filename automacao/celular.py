@@ -17,6 +17,7 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import socket
 import struct
 import threading
@@ -31,6 +32,9 @@ MAX_MESSAGE = 16 * 1024 * 1024
 PING_INTERVAL = 20.0
 READ_TIMEOUT = 75.0  # sem nenhum frame (nem pong) nesse tempo, a conexão é dada como perdida
 CALL_TIMEOUT = 45.0
+# Logo depois de o servidor subir (acordando da hibernação), espera o celular reconectar antes de desistir.
+JANELA_RECONEXAO = float(os.environ.get("AUTOMACAO_JANELA_RECONEXAO", "120"))
+ESPERA_RECONEXAO = float(os.environ.get("AUTOMACAO_ESPERA_RECONEXAO", "35"))
 
 NAO_CONECTADO = ("O celular não está conectado. Abra o app Automação no celular, confira se o serviço de "
                  "acessibilidade está ligado e se o endereço do servidor está correto.")
@@ -221,6 +225,8 @@ class Ponte:
         self._next_id = 0
         self.info: dict[str, Any] = {}
         self.connected_at = 0.0
+        self.iniciado = time.monotonic()
+        self._conectou = threading.Event()
 
     @property
     def conectado(self) -> bool:
@@ -237,6 +243,7 @@ class Ponte:
             log.info("nova conexão do celular substitui a anterior")
             old.close()
         log.info("celular conectado")
+        self._conectou.set()
         stop = threading.Event()
         threading.Thread(target=self._pinger, args=(conn, stop), daemon=True).start()
         try:
@@ -266,6 +273,7 @@ class Ponte:
                 if self._conn is conn:
                     self._conn = None
                     self.info = {}
+                    self._conectou.clear()
                 for waiter in self._pending.values():
                     if waiter[1] is None:
                         waiter[0].set()
@@ -311,6 +319,7 @@ class Ponte:
                 seconds = max(0.0, min(float(arguments.get("seconds", 1)), 30.0))
                 time.sleep(seconds)
                 return [{"type": "text", "text": f"Aguardou {seconds:g} s."}], False
+            self._esperar_reconexao()
             reply = self.pedir(name.removeprefix("android_"), arguments)
         except CelularError as exc:
             return [{"type": "text", "text": str(exc)}], True
@@ -325,6 +334,15 @@ class Ponte:
         if reply.get("texto"):
             content.append({"type": "text", "text": str(reply["texto"])})
         return content or [{"type": "text", "text": "Feito."}], False
+
+    def _esperar_reconexao(self) -> None:
+        """Servidor recém-acordado: dá tempo ao app de reconectar (ele tenta de novo a cada 30 s no máximo)."""
+        if self.conectado or time.monotonic() - self.iniciado > JANELA_RECONEXAO:
+            return
+        if not self._conectou.wait(ESPERA_RECONEXAO) or not self.conectado:
+            raise CelularError("O servidor acabou de iniciar e o celular ainda não reconectou. O app tenta de novo "
+                               "sozinho a cada 30 s no máximo; tente de novo em instantes. " + NAO_CONECTADO)
+        time.sleep(0.5)  # o "olá" do app chega logo depois da conexão
 
     def _status(self) -> str:
         if not self.conectado:

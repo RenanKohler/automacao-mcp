@@ -31,7 +31,7 @@ import javax.net.ssl.SSLSocketFactory;
  *
  * O celular abre a conexão (wss://servidor/celular/token), diz "olá" e fica esperando comandos.
  * Cada comando roda numa thread própria e a resposta volta pela mesma conexão. Se a conexão cair,
- * tenta de novo com espera crescente (2 s a 60 s).
+ * tenta de novo com espera crescente (2 s a 30 s; o servidor gratuito pode estar acordando).
  */
 final class Conexao implements Runnable {
 
@@ -130,7 +130,7 @@ final class Conexao implements Runnable {
             } catch (InterruptedException e) {
                 break;
             }
-            espera = Math.min(espera * 2, 60_000);
+            espera = Math.min(espera * 2, 30_000);
         }
         estado = "Desligado";
     }

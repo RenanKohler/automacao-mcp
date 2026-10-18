@@ -1,0 +1,38 @@
+# Opcional: impede o servidor gratuito do Render de hibernar no horário escolhido, chamando /saude
+# a cada 14 minutos. Fica desligado até você criar a variável do repositório MANTER_ACORDADO_HORARIO
+# (Settings > Secrets and variables > Actions > Variables), por exemplo "7-23": das 7h às 23h59,
+# horário de Brasília. SERVIDOR_URL é opcional (padrão: https://automacao-mcp.onrender.com).
+# O plano gratuito dá 750 horas por mês, o suficiente para um serviço ligado o tempo todo.
+# O GitHub pode atrasar execuções agendadas e as desativa após 60 dias sem commits no repositório.
+name: Manter o servidor acordado
+
+on:
+  schedule:
+    - cron: "*/14 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  ping:
+    if: vars.MANTER_ACORDADO_HORARIO != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Chama /saude dentro do horário
+        env:
+          HORARIO: ${{ vars.MANTER_ACORDADO_HORARIO }}
+          URL: ${{ vars.SERVIDOR_URL || 'https://automacao-mcp.onrender.com' }}
+        run: |
+          inicio=${HORARIO%-*}; fim=${HORARIO#*-}
+          hora=$(TZ=America/Sao_Paulo date +%-H)
+          if [ "$inicio" -le "$fim" ]; then
+            dentro=$([ "$hora" -ge "$inicio" ] && [ "$hora" -le "$fim" ] && echo sim || echo nao)
+          else  # horário que vira a noite, como 20-6
+            dentro=$([ "$hora" -ge "$inicio" ] || [ "$hora" -le "$fim" ] && echo sim || echo nao)
+          fi
+          if [ "$dentro" != sim ]; then
+            echo "Fora do horário $HORARIO (agora ${hora}h em Brasília); nada a fazer."
+            exit 0
+          fi
+          curl -fsS --max-time 120 --retry 2 "${URL%/}/saude" && echo " servidor acordado"
