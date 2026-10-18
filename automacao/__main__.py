@@ -142,7 +142,7 @@ def _run_one(agent, request: str) -> int:
 
 
 def _interactive(agent) -> int:
-    print("Digite um pedido. Comandos: /nova (nova conversa), /sair.", file=sys.stderr)
+    print("Digite um pedido. Comandos: /nova (nova conversa), /custo (tokens da conversa), /sair.", file=sys.stderr)
     while True:
         try:
             request = input("\n> ").strip()
@@ -153,6 +153,9 @@ def _interactive(agent) -> int:
             continue
         if request in ("/sair", "sair", "exit", "quit"):
             return 0
+        if request == "/custo":
+            print(agent.consumo_conversa.texto(), file=sys.stderr)
+            continue
         if request == "/nova":
             agent.reset()
             print("Nova conversa iniciada.", file=sys.stderr)

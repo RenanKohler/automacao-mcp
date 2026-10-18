@@ -42,6 +42,43 @@ Como trabalhar:
 
 
 @dataclass
+class Consumo:
+    """Tokens somados de várias chamadas à API (campo usage de cada resposta)."""
+
+    entrada: int = 0
+    saida: int = 0
+    cache_leitura: int = 0
+    cache_escrita: int = 0
+    chamadas: int = 0
+    sem_dados: int = 0
+
+    def somar(self, usage: Any) -> None:
+        if usage is None:
+            self.sem_dados += 1
+            return
+        self.chamadas += 1
+        self.entrada += getattr(usage, "input_tokens", 0) or 0
+        self.saida += getattr(usage, "output_tokens", 0) or 0
+        self.cache_leitura += getattr(usage, "cache_read_input_tokens", 0) or 0
+        self.cache_escrita += getattr(usage, "cache_creation_input_tokens", 0) or 0
+
+    def acumular(self, outro: "Consumo") -> None:
+        for campo in ("entrada", "saida", "cache_leitura", "cache_escrita", "chamadas", "sem_dados"):
+            setattr(self, campo, getattr(self, campo) + getattr(outro, campo))
+
+    def texto(self) -> str:
+        if not self.chamadas:
+            return "Consumo indisponível (a API não informou os tokens)." if self.sem_dados else "Nenhum consumo ainda."
+        n = lambda v: f"{v:,}".replace(",", ".")
+        linha = (f"Consumo: {n(self.entrada)} tokens de entrada, {n(self.saida)} de saída, "
+                 f"{n(self.cache_leitura)} lidos do cache e {n(self.cache_escrita)} gravados no cache "
+                 f"({self.chamadas} chamada{'s' if self.chamadas != 1 else ''}")
+        if self.sem_dados:
+            linha += f"; parcial: {self.sem_dados} sem dados de consumo"
+        return linha + ")."
+
+
+@dataclass
 class AgentConfig:
     model: str = "claude-opus-5-5"
     effort: str = "high"
@@ -60,6 +97,8 @@ class Agente:
         self.out = out
         self.toolsets = {t.toolset_name: t for t in config.toolsets}
         self.messages: list[dict] = []
+        self.consumo_conversa = Consumo()
+        self.consumo_pedido = Consumo()
         self.system = SYSTEM_PROMPT.format(ambiente=self._describe_environment())
         if config.extra_system:
             self.system += "\n\n" + config.extra_system
@@ -80,6 +119,7 @@ class Agente:
     def reset(self) -> None:
         """Nova conversa (o histórico anterior é descartado por inteiro, não editado)."""
         self.messages = []
+        self.consumo_conversa = Consumo()
 
     def _request_params(self) -> dict[str, Any]:
         params: dict[str, Any] = {
@@ -120,10 +160,20 @@ class Agente:
 
     def run(self, request: str) -> str:
         """Executa um pedido até o modelo encerrar o turno. Devolve o texto final."""
+        self.consumo_pedido = Consumo()
+        try:
+            return self._run(request)
+        finally:
+            self.consumo_conversa.acumular(self.consumo_pedido)
+            if self.consumo_pedido.chamadas or self.consumo_pedido.sem_dados:
+                sys.stderr.write(f"\033[2m{self.consumo_pedido.texto()}\033[0m\n")
+
+    def _run(self, request: str) -> str:
         self.messages.append({"role": "user", "content": request})
         final_text = ""
         for _ in range(self.config.max_turns):
             response = self._stream_turn()
+            self.consumo_pedido.somar(getattr(response, "usage", None))
             self.messages.append({"role": "assistant", "content": response.content})
             final_text = "".join(b.text for b in response.content if b.type == "text")
 
