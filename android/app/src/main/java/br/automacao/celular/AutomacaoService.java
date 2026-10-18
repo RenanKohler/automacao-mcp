@@ -2,6 +2,7 @@ package br.automacao.celular;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
+import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -14,6 +15,7 @@ import android.graphics.Point;
 import android.graphics.Rect;
 import android.hardware.HardwareBuffer;
 import android.hardware.display.DisplayManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Base64;
@@ -52,6 +54,9 @@ public class AutomacaoService extends AccessibilityService implements Conexao.Tr
     private static final int MAX_ELEMENTOS = 300;
     private static final long ASSENTAR_MS = 400;
     private static final long TRAZER_MS = 4000;
+    private static final int MAX_PASSOS = 25;
+    private static final double MAX_ESPERA_S = 30, MAX_PAUSA_PASSO_S = 10;
+    private static final long INTERVALO_ESPERA_MS = 200;
     /** Apps que não são alvo da automação: se um deles vier para a frente, o app alvo é trazido de volta. */
     private static final String PACOTE_CLAUDE = "com.anthropic.claude";
 
@@ -61,6 +66,8 @@ public class AutomacaoService extends AccessibilityService implements Conexao.Tr
     private volatile String appAlvo;
     /** Pacote e teclado na última leitura da tela, para saber se coordenadas antigas ainda valem. */
     private volatile String estadoVisto;
+    /** Momento (uptime) da última troca de janela, para saber quando um link abriu outra tela. */
+    private volatile long ultimaTrocaJanela;
 
     // ------------------------------------------------------------------ ciclo de vida
 
@@ -87,7 +94,10 @@ public class AutomacaoService extends AccessibilityService implements Conexao.Tr
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        // Não reage a eventos: só atende comandos.
+        // Não age por conta própria: só registra trocas de janela (usadas por open_url).
+        if (event != null && event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            ultimaTrocaJanela = android.os.SystemClock.uptimeMillis();
+        }
     }
 
     @Override
@@ -200,32 +210,184 @@ public class AutomacaoService extends AccessibilityService implements Conexao.Tr
                 o.put("texto", nota + o.getString("texto"));
                 return o;
             }
+            case "list_apps":
+                return texto(listarApps(a.optString("filter", "")));
+            case "sequence":
+                return sequencia(a);
+            default:
+                String r = passo(acao, a);
+                if (r == null) {
+                    throw new IllegalArgumentException("Ação não suportada pelo app: " + acao);
+                }
+                return texto(r);
+        }
+    }
+
+    /** Ações que também podem ser passos de android_sequence. Devolve null se a ação não existe. */
+    private String passo(String acao, JSONObject a) throws Exception {
+        switch (acao) {
             case "ui": {
                 String nota = garantirApp(a, false);
                 estadoVisto = estadoTela();
-                return texto(nota + arvore());
+                return nota + arvore();
             }
             case "tap":
-                return texto(tocar(a));
+                return tocar(a);
             case "long_press": {
                 String nota = garantirApp(a, true);
-                return texto(nota + toque(a.getInt("x"), a.getInt("y"), a.optInt("duration_ms", 800)));
+                return nota + toque(a.getInt("x"), a.getInt("y"), a.optInt("duration_ms", 800));
             }
             case "swipe": {
                 String nota = garantirApp(a, true);
-                return texto(nota + deslizar(a.getInt("x1"), a.getInt("y1"), a.getInt("x2"), a.getInt("y2"),
-                        a.optInt("duration_ms", 300)));
+                return nota + deslizar(a.getInt("x1"), a.getInt("y1"), a.getInt("x2"), a.getInt("y2"),
+                        a.optInt("duration_ms", 300));
             }
             case "type":
-                return texto(escrever(a));
+                return escrever(a);
             case "key":
-                return texto(tecla(a.getString("key"), a));
+                return tecla(a.getString("key"), a);
             case "open_app":
-                return texto(abrirApp(a.getString("package")));
-            case "list_apps":
-                return texto(listarApps(a.optString("filter", "")));
+                return abrirApp(a.getString("package"));
+            case "open_url":
+                return abrirUrl(a);
+            case "wait_for":
+                return esperar(a);
+            case "wait": {
+                double s = Math.max(0, Math.min(a.optDouble("seconds", 1), MAX_PAUSA_PASSO_S));
+                pausa((long) (s * 1000));
+                return "Aguardou " + formatar(s) + " s.";
+            }
             default:
-                throw new IllegalArgumentException("Ação não suportada pelo app: " + acao);
+                return null;
+        }
+    }
+
+    private static String formatar(double segundos) {
+        return String.format(Locale.ROOT, "%.1f", segundos);
+    }
+
+    private static String mensagem(Exception e) {
+        return e.getMessage() == null ? e.toString() : e.getMessage();
+    }
+
+    // ---- sequência
+
+    /**
+     * Executa vários passos seguidos sem voltar ao servidor entre eles. Para no primeiro que falhar e
+     * devolve o relato de cada passo mais a tela atual, para quem chamou decidir o próximo passo sem
+     * outra leitura.
+     */
+    private JSONObject sequencia(JSONObject a) throws Exception {
+        JSONArray passos = a.optJSONArray("passos");
+        if (passos == null || passos.length() == 0) {
+            throw new IllegalArgumentException("Informe passos: lista de ações, ex.: "
+                    + "[{\"acao\": \"open_app\", \"package\": \"com.whatsapp\"}, {\"acao\": \"tap\", \"texto\": \"Maria\"}].");
+        }
+        if (passos.length() > MAX_PASSOS) {
+            throw new IllegalArgumentException("No máximo " + MAX_PASSOS + " passos por sequência.");
+        }
+        String app = a.optString("app", "").trim();
+        if (!app.isEmpty()) {
+            appAlvo = app;
+        }
+        boolean lerTela = a.optBoolean("ler_tela", true);
+        long inicio = android.os.SystemClock.uptimeMillis();
+        List<String> relato = new ArrayList<>();
+        int total = passos.length();
+        for (int i = 0; i < total; i++) {
+            JSONObject p = passos.optJSONObject(i);
+            String acao = p == null ? "" : p.optString("acao", "").trim();
+            if (acao.startsWith("android_")) {
+                acao = acao.substring("android_".length());
+            }
+            String rotulo = (i + 1) + ". " + (acao.isEmpty() ? "?" : acao);
+            try {
+                if (p == null) {
+                    throw new IllegalArgumentException("o passo não é um objeto");
+                }
+                if (acao.equals("sequence") || acao.equals("screenshot") || acao.equals("list_apps")) {
+                    throw new IllegalArgumentException("ação não permitida dentro de sequência");
+                }
+                String r = passo(acao, p);
+                if (r == null) {
+                    throw new IllegalArgumentException("ação desconhecida. Use open_app, open_url, tap, "
+                            + "long_press, swipe, type, key, wait, wait_for ou ui");
+                }
+                relato.add(rotulo + ": " + r.trim());
+            } catch (Exception e) {
+                relato.add(rotulo + ": FALHOU. " + mensagem(e));
+                estadoVisto = estadoTela();
+                String txt = "A sequência parou no passo " + (i + 1) + " de " + total + "; os passos seguintes "
+                        + "não foram executados.\n" + String.join("\n", relato) + "\n\nTela agora:\n" + arvore();
+                JSONObject o = new JSONObject();
+                o.put("ok", false);
+                o.put("erro", txt);
+                return o;
+            }
+        }
+        double s = (android.os.SystemClock.uptimeMillis() - inicio) / 1000.0;
+        StringBuilder b = new StringBuilder("Sequência de ").append(total).append(" passos concluída em ")
+                .append(formatar(s)).append(" s.\n").append(String.join("\n", relato));
+        if (lerTela) {
+            estadoVisto = estadoTela();
+            b.append("\n\nTela agora:\n").append(arvore());
+        }
+        return texto(b.toString());
+    }
+
+    // ---- espera por condição
+
+    private AccessibilityNodeInfo primeiroQueConfere(String procurado, String id) {
+        String p = procurado.toLowerCase(Locale.ROOT);
+        AccessibilityNodeInfo parcial = null;
+        for (AccessibilityNodeInfo n : nosVisiveis(false)) {
+            if (!id.isEmpty() && !idConfere(n, id)) {
+                continue;
+            }
+            if (p.isEmpty()) {
+                return n;
+            }
+            String t = textoDe(n).toLowerCase(Locale.ROOT), d = descDe(n).toLowerCase(Locale.ROOT);
+            if (t.equals(p) || d.equals(p)) {
+                return n;
+            }
+            if (parcial == null && (t.contains(p) || d.contains(p))) {
+                parcial = n;
+            }
+        }
+        return parcial;
+    }
+
+    /** Espera um elemento (texto ou id) aparecer, ou sumir com sumir=true, consultando a tela a cada 200 ms. */
+    private String esperar(JSONObject a) throws Exception {
+        String procurado = a.optString("texto", a.optString("text", "")).trim();
+        String id = a.optString("id", "").trim();
+        if (procurado.isEmpty() && id.isEmpty()) {
+            throw new IllegalArgumentException("Informe o texto ou o id do elemento a esperar.");
+        }
+        boolean sumir = a.optBoolean("sumir", false);
+        double limite = Math.max(0.5, Math.min(a.optDouble("timeout_s", 10), MAX_ESPERA_S));
+        String nota = garantirApp(a, false);
+        String alvo = ((procurado.isEmpty() ? "" : "\"" + procurado + "\"") + (id.isEmpty() ? "" : " id=" + id)).trim();
+        long inicio = android.os.SystemClock.uptimeMillis();
+        long fim = inicio + (long) (limite * 1000);
+        while (true) {
+            AccessibilityNodeInfo n = primeiroQueConfere(procurado, id);
+            long agora = android.os.SystemClock.uptimeMillis();
+            String tempo = formatar((agora - inicio) / 1000.0);
+            if (sumir && n == null) {
+                return nota + alvo + " sumiu da tela após " + tempo + " s.";
+            }
+            if (!sumir && n != null) {
+                String linha = descrever(n);
+                return nota + alvo + " apareceu após " + tempo + " s." + (linha != null ? "\n" + linha : "");
+            }
+            if (agora >= fim) {
+                estadoVisto = estadoTela();
+                throw new IllegalStateException(alvo + (sumir ? " continua na tela" : " não apareceu") + " após "
+                        + formatar(limite) + " s.\n\nTela agora:\n" + arvore());
+            }
+            pausa(INTERVALO_ESPERA_MS);
         }
     }
 
@@ -913,6 +1075,56 @@ public class AutomacaoService extends AccessibilityService implements Conexao.Tr
         pausa(600);
         return "Abriu " + pacote + ". As próximas ações conferem se ele continua na frente e o trazem de volta se outro app "
                 + "(como o Claude) tomar a frente.";
+    }
+
+    /**
+     * Abre um link (https://, whatsapp://, tel:, geo:, package:...) ou uma ação do sistema
+     * (ex.: android.settings.WIFI_SETTINGS), opcionalmente num pacote específico. O app que ficar na
+     * frente passa a ser o app operado.
+     */
+    private String abrirUrl(JSONObject a) {
+        String url = a.optString("url", "").trim();
+        String acao = a.optString("action", "").trim();
+        String pacote = a.optString("package", "").trim();
+        if (url.isEmpty() && acao.isEmpty()) {
+            throw new IllegalArgumentException("Informe url (ex.: https://wa.me/5541999999999?text=oi) ou action "
+                    + "(ex.: android.settings.WIFI_SETTINGS).");
+        }
+        Intent i = new Intent(acao.isEmpty() ? Intent.ACTION_VIEW : acao);
+        if (!url.isEmpty()) {
+            i.setData(Uri.parse(url));
+        }
+        if (!pacote.isEmpty()) {
+            i.setPackage(pacote);
+        }
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        String descricao = (acao.isEmpty() ? "" : acao + " ") + url;
+        long antes = android.os.SystemClock.uptimeMillis();
+        try {
+            startActivity(i);
+        } catch (ActivityNotFoundException e) {
+            throw new IllegalArgumentException("Nenhum app do celular abre " + descricao.trim()
+                    + (pacote.isEmpty() ? "" : " no pacote " + pacote) + ".");
+        } catch (SecurityException e) {
+            throw new IllegalStateException("O sistema não permitiu abrir " + descricao.trim() + ": " + mensagem(e));
+        }
+        long fim = antes + TRAZER_MS;
+        while (android.os.SystemClock.uptimeMillis() < fim) {
+            pausa(100);
+            if (ultimaTrocaJanela > antes && (pacote.isEmpty() || pacote.equals(pacoteAtivo()))) {
+                break;
+            }
+        }
+        assentar();
+        String atual = pacoteAtivo();
+        if (!naoEhAlvo(atual)) {
+            appAlvo = atual;
+        }
+        String r = "Abriu " + descricao.trim() + "; na frente está " + (atual.isEmpty() ? "um app desconhecido" : atual) + ".";
+        if (atual.equals("android") || atual.contains("resolver") || atual.contains("intentresolver")) {
+            r += " Apareceu o seletor de apps: escolha com android_tap ou repita passando package.";
+        }
+        return r;
     }
 
     private String listarApps(String filtro) {

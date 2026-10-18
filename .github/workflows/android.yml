@@ -6,6 +6,10 @@ on:
     paths:
       - "android/**"
       - ".github/workflows/android.yml"
+  pull_request:
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
   workflow_dispatch:
 
 permissions:
@@ -61,6 +65,7 @@ jobs:
         run: gradle -p android assembleDebug --no-daemon --stacktrace
 
       - name: Publica na release "android"
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
