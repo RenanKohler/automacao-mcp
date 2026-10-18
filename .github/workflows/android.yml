@@ -26,16 +26,53 @@ jobs:
         with:
           gradle-version: "8.14.3"
 
+      # A chave fica nos segredos do repositório (python android/gerar_chave.py), nunca no código.
+      - name: Prepara a chave de assinatura
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KEYSTORE_SENHA: ${{ secrets.ANDROID_KEYSTORE_SENHA }}
+          # Certificado da chave antiga, que esteve no repositório público: comprometida, não pode voltar.
+          SHA256_COMPROMETIDA: "23:4D:67:88:B5:98:20:7B:59:0F:AB:DC:DB:75:4B:54:83:11:DD:F0:EF:83:F5:3F:EA:CD:73:A3:C0:A4:98:11"
+        run: |
+          faltam=""
+          [ -n "$KEYSTORE_B64" ] || faltam="$faltam ANDROID_KEYSTORE_B64"
+          [ -n "$KEYSTORE_SENHA" ] || faltam="$faltam ANDROID_KEYSTORE_SENHA"
+          if [ -n "$faltam" ]; then
+            echo "::error::Segredos ausentes:$faltam. Rode python android/gerar_chave.py no PC para criá-los. Nenhum APK foi publicado."
+            exit 1
+          fi
+          chave="$RUNNER_TEMP/assinatura.p12"
+          echo "$KEYSTORE_B64" | base64 -d > "$chave"
+          impressao=$(keytool -list -v -keystore "$chave" -storetype pkcs12 -storepass:env KEYSTORE_SENHA -alias automacao \
+            | sed -n 's/^[[:space:]]*SHA256: //p')
+          if [ -z "$impressao" ]; then
+            echo "::error::Não foi possível ler a chave com ANDROID_KEYSTORE_SENHA (alias automacao)."
+            exit 1
+          fi
+          if [ "$impressao" = "$SHA256_COMPROMETIDA" ]; then
+            echo "::error::A chave nos segredos é a antiga, que esteve no repositório público. Gere uma nova."
+            exit 1
+          fi
+          echo "ANDROID_KEYSTORE=$chave" >> "$GITHUB_ENV"
+
       - name: Compila o APK
+        env:
+          ANDROID_KEYSTORE_SENHA: ${{ secrets.ANDROID_KEYSTORE_SENHA }}
         run: gradle -p android assembleDebug --no-daemon --stacktrace
 
       - name: Publica na release "android"
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          rm -f "$ANDROID_KEYSTORE"
           cp android/app/build/outputs/apk/debug/app-debug.apk automacao-celular.apk
+          cat > notas.md <<'NOTAS'
+          Baixe automacao-celular.apk no celular, instale, ligue o serviço Automação em Acessibilidade e cole a URL do conector no app.
+
+          **Chave de assinatura nova desde 18/10/2026.** Se o app foi instalado antes dessa data, o Android recusa a atualização: desinstale o app Automação, instale este APK, ligue o serviço de acessibilidade de novo e cole a URL do conector outra vez. Depois disso, as próximas versões voltam a instalar por cima.
+          NOTAS
           gh release delete android --yes --cleanup-tag || true
           gh release create android automacao-celular.apk \
             --target "${{ github.sha }}" \
             --title "App Android (compilação ${{ github.run_number }})" \
-            --notes "Baixe automacao-celular.apk no celular, instale, ligue o serviço Automação em Acessibilidade e cole a URL do conector no app."
+            --notes-file notas.md

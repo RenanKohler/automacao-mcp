@@ -54,3 +54,13 @@ o serviço "Automação" em Configurações > Acessibilidade. Se o Android bloqu
 abra Informações do app > ⋮ > Permitir configurações restritas. Permita também rodar em segundo plano.
 
 Teste da ponte no servidor, sem celular: `python -m testes.teste_celular`.
+
+### Assinatura do APK
+
+A chave de assinatura fica nos segredos do repositório (`ANDROID_KEYSTORE_B64` e `ANDROID_KEYSTORE_SENHA`),
+nunca no código. Para criá-la, uma vez, no PC: `python android/gerar_chave.py` (precisa do pacote
+`cryptography` ou do `keytool` do Java). O script guarda a chave em `~/.automacao/` e grava os segredos
+pelo GitHub CLI, se estiver logado, ou abre a página de segredos para você colar. Sem os segredos o
+workflow falha e a release anterior continua no ar. A chave antiga, que esteve no repositório público até
+18/10/2026, é recusada pelo workflow. Quem instalou o app antes dessa data precisa desinstalar uma vez antes
+de instalar o APK assinado com a chave nova.

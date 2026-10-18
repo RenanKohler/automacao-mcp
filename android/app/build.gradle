@@ -5,6 +5,11 @@ plugins {
 // Número da compilação do GitHub Actions: cada APK novo instala por cima do anterior.
 def build = Integer.parseInt(System.getenv("GITHUB_RUN_NUMBER") ?: "1")
 
+if (!System.getenv("ANDROID_KEYSTORE") || !System.getenv("ANDROID_KEYSTORE_SENHA")) {
+    throw new GradleException("Faltam ANDROID_KEYSTORE e ANDROID_KEYSTORE_SENHA: o APK só é assinado com a chave pessoal. "
+            + "Veja android/gerar_chave.py.")
+}
+
 android {
     namespace "br.automacao.celular"
     compileSdk 35
@@ -17,18 +22,25 @@ android {
         versionName "1.0." + build
     }
 
-    // Chave fixa no repositório para que as atualizações instalem por cima (app de uso pessoal).
+    // Chave de assinatura fora do repositório: o workflow a decodifica dos segredos do GitHub
+    // (ANDROID_KEYSTORE_B64 e ANDROID_KEYSTORE_SENHA) e passa o caminho e a senha por variáveis de ambiente.
+    // Para gerar a chave e gravar os segredos: python android/gerar_chave.py
+    def chave = System.getenv("ANDROID_KEYSTORE")
+    def senha = System.getenv("ANDROID_KEYSTORE_SENHA")
     signingConfigs {
-        fixa {
-            storeFile file("automacao.keystore")
-            storePassword "automacao"
-            keyAlias "automacao"
-            keyPassword "automacao"
+        pessoal {
+            if (chave && senha) {
+                storeFile file(chave)
+                storeType "pkcs12"
+                storePassword senha
+                keyAlias "automacao"
+                keyPassword senha
+            }
         }
     }
     buildTypes {
         debug {
-            signingConfig signingConfigs.fixa
+            signingConfig signingConfigs.pessoal
         }
     }
     compileOptions {
