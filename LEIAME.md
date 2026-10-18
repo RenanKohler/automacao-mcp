@@ -25,6 +25,18 @@ O script cria o Space público `<seu usuário>/automacao-mcp`, grava o token de 
 O código do Space fica público; o token não. No plano gratuito o Space dorme após 48 h sem uso e
 acorda na primeira chamada, que pode demorar cerca de um minuto.
 
+## Trocar o token (se a URL do conector vazar)
+
+No PC, com uma chave da API do Render (https://dashboard.render.com/u/settings#api-keys):
+
+    $env:RENDER_API_KEY = "<chave>"     # PowerShell; não cole a chave em chats
+    python trocar_token.py
+
+O script grava um token novo em `MCP_TOKEN`, publica, confere que o token novo entra e o antigo recebe
+401, guarda o token em `.mcp_token` e imprime a nova URL. Se a API ou o deploy falharem, o token antigo
+continua valendo. Depois, troque a URL no conector do claude.ai e no app do celular.
+Teste sem rede: `python -m testes.teste_trocar_token`.
+
 ## Registrar
 
 - claude.ai: Configurações > Conectores > Adicionar conector personalizado, colar a URL completa.
